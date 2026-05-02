@@ -422,7 +422,7 @@ sequenceDiagram
     OR-->>API: Transcript / chapter text
     API->>OR: Summarize each chapter
     OR-->>API: Summary text
-    API->>DB: INSERT chapters, transcriptions, summaries; status=completed
+    API->>DB: INSERT chapters/transcriptions/summaries and set status completed
     API-->>UI: RecordingDetailOut
 
     UI->>API: GET /api/recordings/{id}
