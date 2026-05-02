@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Bind-mount so recordings and the SQLite DB are directly accessible on
+      # the host at ./data/ — no data is lost when the container is recreated.
+      # data/audio/ is also served at GET /media/audio/ for browser playback.
+      - ./data:/app/data
+    # Load OPENROUTER_API_KEY (and any other vars) from the .env file.
+    # Copy .env.example → .env and fill in your key before first run.
+    env_file:
+      - .env
+    restart: unless-stopped

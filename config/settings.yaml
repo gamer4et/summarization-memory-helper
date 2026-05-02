@@ -1,0 +1,32 @@
+app:
+  name: "Book Summarizer"
+  debug: false
+
+audio:
+  sample_rate: 16000          # webrtcvad requires 8/16/32 kHz; 16k is standard
+  frame_duration_ms: 30       # 10, 20, or 30 ms frames for webrtcvad
+  vad_aggressiveness: 0       # 0-3: 0 = least aggressive (keeps most audio)
+  min_speech_duration_ms: 100 # drop speech shorter than this (was 300 ms)
+  max_silence_ms: 2000        # allow 2s silence before splitting chunk (was 1s)
+  storage_dir: "./data/audio"              # legacy assembled/live WAV directory
+  raw_storage_dir: "./data/raw_audio"      # complete browser session blobs
+  vad_storage_dir: "./data/vad_audio"      # VAD-filtered WAVs used for transcription
+  decoded_storage_dir: "./data/decoded_audio" # decoded full-session WAVs for diagnostics
+  min_transcription_audio_bytes: 32044      # 44-byte WAV header + 1s of 16kHz PCM
+
+openrouter:
+  api_key: ""   # set via OPENROUTER_API_KEY environment variable
+  transcription:
+    model: "google/gemini-3.1-flash-lite-preview"
+    default_language: "ru"
+  summarization:
+    model: "google/gemini-3.1-pro-preview"
+    max_tokens: 16256
+    temperature: 0.1
+    system_prompt: |
+      You are a precise summarization assistant.
+      Summarize the following book chapter transcript in 3-5 bullet points.
+      Capture key arguments, events, and conclusions.
+
+database:
+  url: "sqlite:///./data/app.db"
