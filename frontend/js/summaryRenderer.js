@@ -392,6 +392,9 @@ function splitFlowchartSubgraphs(diagram) {
 
   if (current?.length) subgraphs.push(current.join("\n").trim());
 
+  // Independent top-level subgraphs are rendered by Mermaid side-by-side in a
+  // single wide SVG. Split them into separate frames so they stack vertically
+  // and each graph can use the full summary width.
   if (subgraphs.length <= 1 || outsideContent.length) return [diagram];
 
   return subgraphs.map((subgraph) => [...prefix, subgraph].join("\n").trim());
@@ -438,8 +441,11 @@ function normalizeMermaidKey(diagram) {
     .toLowerCase();
 }
 
-function repairMermaidDiagram(diagram) {
-  const lines = String(diagram ?? "").replace(/\s+$/g, "").split(/\r?\n/);
+export function repairMermaidDiagram(diagram) {
+  const lines = String(diagram ?? "")
+    .replace(/\s+$/g, "")
+    .split(/\r?\n/)
+    .map(repairMermaidEdgeLabels);
   let openSubgraphs = 0;
 
   for (const line of lines) {
@@ -455,6 +461,21 @@ function repairMermaidDiagram(diagram) {
   }
 
   return lines.join("\n").trim();
+}
+
+function repairMermaidEdgeLabels(line) {
+  const source = String(line ?? "");
+  if (!source.includes("|")) return source;
+
+  return source.replace(/\|([^|\n]+)\|/g, (match, label) => {
+    const normalizedLabel = String(label).trim();
+    if (!normalizedLabel || /^(["']).*\1$/.test(normalizedLabel)) return match;
+
+    const escapedLabel = normalizedLabel
+      .replace(/&quot;/g, '"')
+      .replace(/"/g, "#quot;");
+    return `|"${escapedLabel}"|`;
+  });
 }
 
 function renderBasicMarkdown(markdown) {
