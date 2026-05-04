@@ -11,6 +11,7 @@
 
 import { api, ApiError, processRecording } from "../api.js";
 import { showToast } from "../app.js";
+import { renderMermaidDiagrams, renderSummaryWithTranscriptGraphs } from "../summaryRenderer.js";
 
 /**
  * @param {HTMLElement} container
@@ -52,6 +53,7 @@ export async function renderBookDetail(
   }
 
   container.innerHTML = buildBookDetailHTML(book);
+  renderMermaidDiagrams(container);
 
   container.querySelector("#btn-back")?.addEventListener("click", onBack);
   container.querySelector("#btn-new-recording")?.addEventListener("click", () => {
@@ -67,18 +69,24 @@ export async function renderBookDetail(
   container.querySelectorAll("[data-action='process-recording']").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const recordingId = Number(btn.dataset.recordingId);
+      const recording = findRecording(book, recordingId);
+      const defaultLabel = btn.dataset.defaultLabel || btn.textContent.trim() || "Process";
+
+      if (recording?.status === "completed" && !confirm(recordingReprocessMessage(recording))) return;
+
       btn.disabled = true;
-      btn.textContent = "Processing…";
+      btn.textContent = recording?.status === "completed" ? "Reprocessing…" : "Processing…";
 
       try {
         const result = await processRecording(recordingId, "ru");
-        showToast(`Processing complete: ${result.chapters?.length ?? 0} chapter(s).`, "success");
+        const verb = recording?.status === "completed" ? "Reprocessing" : "Processing";
+        showToast(`${verb} complete: ${result.chapters?.length ?? 0} chapter(s).`, "success");
         onViewResults(recordingId);
       } catch (err) {
         const detail = err instanceof ApiError ? err.detail : err.message;
         showToast(`Processing failed: ${detail}`, "error", 6000);
         btn.disabled = false;
-        btn.textContent = "Process (Russian)";
+        btn.textContent = defaultLabel;
       }
     });
   });
@@ -105,24 +113,24 @@ export async function renderBookDetail(
     });
   });
 
-  container.querySelectorAll("[data-action='restart-recording']").forEach((btn) => {
+  container.querySelectorAll("[data-action='re-record']").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const recordingId = Number(btn.dataset.recordingId);
       const recording = findRecording(book, recordingId);
 
-      if (!confirm(recordingRestartMessage(recording))) return;
+      if (!confirm(recordingReRecordMessage(recording))) return;
 
       btn.disabled = true;
-      btn.textContent = "Restarting…";
+      btn.textContent = "Opening recorder…";
 
       try {
         await api.delete(`/api/recordings/${recordingId}`);
-        showToast(`Recording #${recordingId} deleted. Starting a clean recording…`, "success");
+        showToast(`Recording #${recordingId} deleted. Starting a clean re-recording…`, "success");
         onNewRecording(book);
       } catch (err) {
-        showToast(`Restart failed: ${err.detail || err.message}`, "error", 6000);
+        showToast(`Re-record failed: ${err.detail || err.message}`, "error", 6000);
         btn.disabled = false;
-        btn.textContent = "Restart";
+        btn.textContent = "Re-record";
       }
     });
   });
@@ -250,26 +258,32 @@ function buildInlineChapterHTML(chapter) {
   return `
     <div class="inline-chapter-card">
       <div class="inline-chapter-title">
-        <span class="chunk-badge">Chunk ${chapter.chapter_number}</span>
+        <span class="chunk-badge">Chapter ${chapter.chapter_number}</span>
         ${escHtml(title)}
-      </div>
-      <div class="inline-chapter-block">
-        <strong>Transcription</strong>
-        <pre>${escHtml(transcription)}</pre>
       </div>
       ${summary ? `
         <div class="inline-chapter-block inline-summary-block">
-          <strong>Summary</strong>
-          <pre>${escHtml(summary)}</pre>
+          <div class="inline-summary-heading">
+            <strong>Summary</strong>
+            <span class="summary-format-badge">Markdown</span>
+          </div>
+          <div class="summary-markdown inline-summary-markdown">${renderSummaryWithTranscriptGraphs(summary, transcription)}</div>
         </div>` : ""}
+      <details class="inline-chapter-block transcription-details inline-transcription-details">
+        <summary>
+          <span>Transcription</span>
+          <span class="details-hint">show raw transcript</span>
+        </summary>
+        <pre>${escHtml(transcription)}</pre>
+      </details>
     </div>
   `;
 }
 
 function buildRecordingActionHTML(recording) {
   const destructiveActions = `
-    <button class="btn-ghost btn-sm" data-action="restart-recording" data-recording-id="${recording.id}">
-      Restart
+    <button class="btn-ghost btn-sm" data-action="re-record" data-recording-id="${recording.id}">
+      Re-record
     </button>
     <button class="btn-danger btn-sm" data-action="delete-recording" data-recording-id="${recording.id}">
       Delete
@@ -282,7 +296,12 @@ function buildRecordingActionHTML(recording) {
         <button class="btn-primary" data-action="view-results" data-recording-id="${recording.id}">
           View Chapters &amp; Transcription
         </button>
-        <div class="recording-secondary-actions">${destructiveActions}</div>
+        <div class="recording-secondary-actions">
+          <button class="btn-ghost btn-sm" data-action="process-recording" data-recording-id="${recording.id}" data-default-label="Reprocess">
+            Reprocess
+          </button>
+          ${destructiveActions}
+        </div>
       </div>
     `;
   }
@@ -290,7 +309,7 @@ function buildRecordingActionHTML(recording) {
   if (recording.status === "ready") {
     return `
       <div class="recording-action-stack">
-        <button class="btn-primary" data-action="process-recording" data-recording-id="${recording.id}">
+        <button class="btn-primary" data-action="process-recording" data-recording-id="${recording.id}" data-default-label="Process (Russian)">
           Process (Russian)
         </button>
         <div class="recording-secondary-actions">${destructiveActions}</div>
@@ -319,7 +338,9 @@ function buildRecordingActionHTML(recording) {
   if (recording.status === "error") {
     return `
       <div class="recording-action-stack">
-        <button class="btn-ghost" disabled>Needs retry</button>
+        <button class="btn-primary" data-action="process-recording" data-recording-id="${recording.id}" data-default-label="Retry Processing">
+          Retry Processing
+        </button>
         <div class="recording-secondary-actions">${destructiveActions}</div>
       </div>
     `;
@@ -436,12 +457,21 @@ function recordingDeleteMessage(recording) {
   ].join("\n");
 }
 
-function recordingRestartMessage(recording) {
+function recordingReRecordMessage(recording) {
   return [
-    `Restart recording #${recording.id}?`,
+    `Re-record recording #${recording.id}?`,
     "",
     "The current recording and its audio/chapters/transcriptions/summaries will be deleted.",
     "A new clean recording screen for this book will open immediately.",
+  ].join("\n");
+}
+
+function recordingReprocessMessage(recording) {
+  return [
+    `Reprocess recording #${recording.id}?`,
+    "",
+    "The saved audio will be transcribed and analyzed again.",
+    "Existing chapters, transcriptions, and summaries will be replaced.",
   ].join("\n");
 }
 
@@ -479,7 +509,7 @@ function statusDescription(status) {
     case "recording":
       return "This recording session was created but has not been finalized with uploaded audio.";
     case "error":
-      return "Processing or audio finalization failed. Existing failed state is shown instead of being hidden.";
+      return "Processing or audio finalization failed. Retry processing if the saved audio is valid, or re-record from scratch.";
     default:
       return "Recording is stored with an unknown status.";
   }

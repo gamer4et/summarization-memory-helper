@@ -7,6 +7,7 @@
 
 import { api } from "../api.js";
 import { showToast } from "../app.js";
+import { renderMermaidDiagrams, renderSummaryWithTranscriptGraphs } from "../summaryRenderer.js";
 
 /**
  * @param {HTMLElement} container
@@ -44,6 +45,7 @@ export async function renderChapterView(container, { recordingId, onBack, onBook
 
   // Build the view
   container.innerHTML = buildChapterViewHTML(recording);
+  renderMermaidDiagrams(container);
 
   // Wire chapter accordion items
   container.querySelectorAll(".chapter-summary-row").forEach((row) => {
@@ -103,11 +105,12 @@ function buildChapterViewHTML(recording) {
     : "";
 
   return `
+    <div class="chapter-view">
     <div class="chapter-view-header">
       <h2>Recording Results</h2>
       <div class="sub">
         ${statusBadge}
-        &nbsp;·&nbsp; ${recording.chapters?.length ?? 0} chunk(s)
+        &nbsp;·&nbsp; ${recording.chapters?.length ?? 0} chapter(s)
         &nbsp;·&nbsp; Duration: ${escHtml(durationStr)}
         ${recording.processed_at
           ? `&nbsp;·&nbsp; Processed ${formatDate(recording.processed_at)}`
@@ -123,6 +126,7 @@ function buildChapterViewHTML(recording) {
       <button class="btn-ghost" id="btn-back">← Back to Book</button>
       <button class="btn-primary" id="btn-new-recording">🎙 Record Again</button>
       <button class="btn-ghost" id="btn-export">⬇ Export Text</button>
+    </div>
     </div>
   `;
 }
@@ -144,18 +148,37 @@ function buildChaptersHTML(chapters) {
 
 function buildChapterItemHTML(chapter) {
   const transcriptionHTML = chapter.transcription
-    ? `<div class="chapter-section">
-         <h4>📝 Transcription</h4>
+    ? `<details class="chapter-section transcription-details">
+         <summary>
+           <span>📝 Transcription</span>
+           <span class="details-hint">show raw transcript</span>
+         </summary>
          <pre>${escHtml(chapter.transcription.raw_text)}</pre>
-       </div>`
+       </details>`
     : `<div class="chapter-section text-muted text-sm">No transcription available.</div>`;
 
   const summaryHTML = chapter.summary
-    ? `<div class="chapter-section summary-section">
-         <h4>✨ Summary</h4>
-         <pre>${escHtml(chapter.summary.summary_text)}</pre>
-         <div class="text-muted text-sm mt-1">Model: ${escHtml(chapter.summary.model_used)}</div>
-       </div>`
+    ? `<section class="chapter-section summary-section" aria-label="Chapter summary">
+         <div class="summary-section-header">
+           <div class="summary-title-group">
+             <span class="summary-icon-badge" aria-hidden="true">✨</span>
+             <div>
+               <h4>Smart Summary</h4>
+               <p>Key ideas, quotes, and relationship maps distilled from this chapter.</p>
+             </div>
+           </div>
+           <span class="summary-format-badge">Markdown + Graphs</span>
+         </div>
+         <div class="summary-content-shell">
+           <div class="summary-markdown">${renderSummaryWithTranscriptGraphs(
+             chapter.summary.summary_text,
+             chapter.transcription?.raw_text || ""
+           )}</div>
+         </div>
+         <div class="summary-meta-row">
+           <span class="summary-model-chip">🤖 Model: ${escHtml(chapter.summary.model_used)}</span>
+         </div>
+       </section>`
     : `<div class="chapter-section text-muted text-sm">No summary available.</div>`;
 
   const titleText = escHtml(deriveChapterTitle(chapter));
@@ -166,14 +189,14 @@ function buildChapterItemHTML(chapter) {
            aria-expanded="false" aria-controls="ch-body-${chapter.id}">
         <div class="chapter-num-badge">${chapter.chapter_number}</div>
         <div class="chapter-title-text">
-          <span class="chunk-badge">Chunk ${chapter.chapter_number}</span>
+          <span class="chunk-badge">Chapter ${chapter.chapter_number}</span>
           ${titleText}
         </div>
         <span class="chapter-chevron">▼</span>
       </div>
       <div class="chapter-body" id="ch-body-${chapter.id}">
-        ${transcriptionHTML}
         ${summaryHTML}
+        ${transcriptionHTML}
       </div>
     </div>
   `;

@@ -9,3 +9,4 @@ webrtcvad>=2.0.10
 ffmpeg-python>=0.2
 python-multipart>=0.0.9
 aiofiles>=23.2
+tenacity>=8.0.0

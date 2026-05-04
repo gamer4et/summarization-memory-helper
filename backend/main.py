@@ -38,6 +38,42 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _reset_interrupted_processing_recordings() -> None:
+    """
+    Recover recordings left in ``processing`` after an app restart/crash.
+
+    Processing is currently executed inside the HTTP request handler. If the
+    container is restarted while a request is running, there is no background
+    worker to resume it, but the database status may remain ``processing`` and
+    the frontend will keep showing a spinner forever.
+    """
+    from backend.core.database import SessionLocal
+    from backend.models.orm import Recording
+
+    db = SessionLocal()
+    try:
+        interrupted = (
+            db.query(Recording)
+            .filter(Recording.status == "processing")
+            .all()
+        )
+        if not interrupted:
+            return
+
+        for recording in interrupted:
+            logger.warning(
+                "Recording %d was left in status=processing; marking as error so it can be retried.",
+                recording.id,
+            )
+            recording.status = "error"
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to reset interrupted processing recordings.")
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------
 # Startup / shutdown lifecycle
 # ---------------------------------------------------------------------------
@@ -73,6 +109,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Bootstrap the database.
     create_all_tables()
+    _reset_interrupted_processing_recordings()
     logger.info("Application startup complete — %s", settings.app_name)
 
     yield  # ← application runs here

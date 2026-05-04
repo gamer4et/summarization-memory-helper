@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import subprocess
 import wave
 from dataclasses import dataclass
@@ -24,6 +25,10 @@ from backend.core.config import settings
 from backend.services.vad_service import VADProcessor
 
 logger = logging.getLogger(__name__)
+
+# Keep requests large enough to avoid dozens of tiny OpenRouter calls, but small
+# enough that each upload/transcription has a bounded timeout and payload size.
+_MAX_TRANSCRIPTION_CHUNK_MS = 5 * 60 * 1000
 
 
 class AudioPipelineError(RuntimeError):
@@ -37,6 +42,7 @@ class FinalizedAudio:
     raw_path: Path
     decoded_path: Path
     vad_path: Path
+    vad_chunk_paths: tuple[Path, ...]
     decoded_bytes: int
     vad_bytes: int
     vad_duration_seconds: float
@@ -64,17 +70,23 @@ async def finalize_raw_recording(raw_path: Path, recording_id: int) -> Finalized
             f"Decoded audio is empty for recording {recording_id}. Raw file: {raw_path.name}"
         )
 
-    vad_pcm, speech_segments = _run_offline_vad(decoded_pcm, recording_id)
-    if not vad_pcm:
+    speech_segments = _run_offline_vad(decoded_pcm, recording_id)
+    if not speech_segments:
         # Ensure stale output from previous attempts cannot be transcribed.
         if vad_path.exists():
             vad_path.unlink()
+        chunk_dir = _vad_chunk_dir(recording_id)
+        if chunk_dir.exists():
+            shutil.rmtree(chunk_dir)
         raise AudioPipelineError(
             "VAD did not detect speech in the uploaded recording. "
             "Please record again and speak clearly near the microphone."
         )
 
+    vad_pcm = b"".join(speech_segments)
     _write_wav(vad_path, vad_pcm)
+    transcription_chunks = _pack_transcription_chunks(speech_segments)
+    vad_chunk_paths = _write_vad_chunks(recording_id, transcription_chunks)
     vad_bytes = vad_path.stat().st_size
     if vad_bytes < settings.audio.min_transcription_audio_bytes:
         raise AudioPipelineError(
@@ -84,14 +96,15 @@ async def finalize_raw_recording(raw_path: Path, recording_id: int) -> Finalized
 
     vad_duration = len(vad_pcm) / 2 / settings.audio.sample_rate
     logger.info(
-        "Finalized recording_id=%d raw=%s decoded=%s vad=%s decoded_pcm=%d vad_pcm=%d segments=%d duration=%.2fs",
+        "Finalized recording_id=%d raw=%s decoded=%s vad=%s chunks=%d decoded_pcm=%d vad_pcm=%d segments=%d duration=%.2fs",
         recording_id,
         raw_path,
         decoded_path,
         vad_path,
+        len(vad_chunk_paths),
         len(decoded_pcm),
         len(vad_pcm),
-        speech_segments,
+        len(speech_segments),
         vad_duration,
     )
 
@@ -99,10 +112,11 @@ async def finalize_raw_recording(raw_path: Path, recording_id: int) -> Finalized
         raw_path=raw_path,
         decoded_path=decoded_path,
         vad_path=vad_path,
+        vad_chunk_paths=vad_chunk_paths,
         decoded_bytes=len(decoded_pcm),
         vad_bytes=vad_bytes,
         vad_duration_seconds=vad_duration,
-        speech_segments=speech_segments,
+        speech_segments=len(speech_segments),
     )
 
 
@@ -151,22 +165,82 @@ def _read_wav_pcm(path: Path) -> bytes:
         return wav.readframes(wav.getnframes())
 
 
-def _run_offline_vad(pcm_bytes: bytes, recording_id: int) -> tuple[bytes, int]:
+def _run_offline_vad(pcm_bytes: bytes, recording_id: int) -> list[bytes]:
     """Run the existing VAD processor over the full decoded PCM stream."""
     vad = VADProcessor(recording_id=recording_id)
     speech_chunks: list[bytes] = []
-    speech_segments = 0
 
     for segment in vad.process(pcm_bytes):
         speech_chunks.append(segment.pcm_bytes)
-        speech_segments += 1
 
     trailing = vad.flush()
     if trailing:
         speech_chunks.append(trailing.pcm_bytes)
-        speech_segments += 1
 
-    return b"".join(speech_chunks), speech_segments
+    return speech_chunks
+
+
+def _pack_transcription_chunks(speech_segments: list[bytes]) -> list[bytes]:
+    """
+    Pack short VAD utterances into bounded transcription chunks.
+
+    WebRTC VAD often emits one segment per phrase. Sending every phrase to the
+    LLM would create too many API calls, so segments are merged up to a target
+    duration while preserving VAD boundaries between chunks.
+    """
+    max_bytes = settings.audio.sample_rate * 2 * _MAX_TRANSCRIPTION_CHUNK_MS // 1000
+    chunks: list[bytes] = []
+    current: list[bytes] = []
+    current_bytes = 0
+
+    for segment in speech_segments:
+        segment_bytes = len(segment)
+        if current and current_bytes + segment_bytes > max_bytes:
+            chunks.append(b"".join(current))
+            current = []
+            current_bytes = 0
+        current.append(segment)
+        current_bytes += segment_bytes
+
+    if current:
+        chunks.append(b"".join(current))
+
+    logger.info(
+        "Packed %d VAD utterance(s) into %d transcription chunk(s) (max %.0fs each)",
+        len(speech_segments),
+        len(chunks),
+        _MAX_TRANSCRIPTION_CHUNK_MS / 1000,
+    )
+    return chunks
+
+
+def _vad_chunk_dir(recording_id: int) -> Path:
+    return Path(settings.audio.vad_storage_dir) / f"{recording_id}_chunks"
+
+
+def _write_vad_chunks(recording_id: int, speech_chunks: list[bytes]) -> tuple[Path, ...]:
+    """Write each packed VAD transcription chunk as a separate WAV file."""
+    chunk_dir = _vad_chunk_dir(recording_id)
+    if chunk_dir.exists():
+        shutil.rmtree(chunk_dir)
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+
+    width = max(2, len(str(len(speech_chunks))))
+    paths: list[Path] = []
+    for index, pcm_bytes in enumerate(speech_chunks, start=1):
+        chunk_path = chunk_dir / f"chunk_{index:0{width}d}.wav"
+        _write_wav(chunk_path, pcm_bytes)
+        paths.append(chunk_path)
+        logger.info(
+            "Wrote VAD chunk recording_id=%d chunk=%d/%d path=%s duration=%.2fs bytes=%d",
+            recording_id,
+            index,
+            len(speech_chunks),
+            chunk_path,
+            len(pcm_bytes) / 2 / settings.audio.sample_rate,
+            len(pcm_bytes),
+        )
+    return tuple(paths)
 
 
 def _write_wav(path: Path, pcm_bytes: bytes) -> None:

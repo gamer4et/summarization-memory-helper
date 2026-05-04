@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Book Summarizer</title>
+  <link rel="icon" type="image/png" href="/favicon.png" />
   <link rel="stylesheet" href="/css/styles.css" />
 </head>
 <body>
@@ -11,7 +12,8 @@
     <header class="site-header">
       <div class="header-inner">
         <h1 class="site-title">
-          <span class="icon">📚</span> Book Summarizer
+          <img class="site-logo" src="/favicon.png" alt="" aria-hidden="true" />
+          <span>Book Summarizer</span>
         </h1>
         <nav id="breadcrumb" class="breadcrumb" aria-label="Breadcrumb"></nav>
       </div>
@@ -29,6 +31,9 @@
   <!-- Toast notification container -->
   <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.3/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script type="module" src="/js/app.js"></script>
 </body>
 </html>

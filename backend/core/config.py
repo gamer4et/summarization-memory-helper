@@ -66,6 +66,9 @@ class OpenRouterSummarizationSettings(BaseModel):
     max_tokens: int = 0
     temperature: float = 0.0
     system_prompt: str = ""
+    default_modes: str = "dense_summary, key_facts, triples, quotes, categories"
+    language: str = "auto"
+    density_iterations: int = 3
 
 
 class OpenRouterSettings(BaseModel):

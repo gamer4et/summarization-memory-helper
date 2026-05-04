@@ -10,6 +10,7 @@ POST   /api/recordings/{id}/process — trigger transcription + summarization pi
 """
 
 import logging
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Response, UploadFile, status
@@ -189,13 +190,17 @@ async def trigger_processing(
     """
     Run the full pipeline on a ``ready`` recording:
 
-    1. Transcribe the VAD-filtered WAV file via a multimodal LLM.
-    2. Detect chapter boundaries as part of the transcription response.
-    3. Summarize each chapter via OpenRouter LLM.
-    4. Persist chapters / transcriptions / summaries.
+    1. Transcribe the VAD-filtered WAV chunks via a multimodal LLM.
+    2. Concatenate chunk transcriptions into one complete transcript.
+    3. Analyze chapter boundaries from the complete transcript only.
+    4. Summarize each analyzed chapter via OpenRouter LLM.
+    5. Persist chapters / transcriptions / summaries.
 
-    The recording must be in ``ready`` status for this to succeed. On error,
-    the recording is marked ``error`` and a clear API error is returned.
+    The recording must be in ``ready`` status for the first processing attempt,
+    ``error`` status for a retry, or ``completed`` status for reprocessing
+    against the already-finalized audio file.
+    On error, the recording is marked ``error`` and a clear API error is
+    returned.
 
     Request body
     ------------
@@ -205,24 +210,36 @@ async def trigger_processing(
     if recording is None:
         raise not_found("Recording", recording_id)
 
-    if recording.status == "completed":
-        raise bad_request(
-            f"Recording {recording_id} is already processed (status='completed')."
-        )
+    logger.info(
+        "Processing request received: recording_id=%d status=%s language=%s",
+        recording_id,
+        recording.status,
+        request.language,
+    )
+
     if recording.status == "processing":
+        logger.warning("Processing request rejected: recording_id=%d already processing", recording_id)
         raise bad_request(
             f"Recording {recording_id} is already being processed."
         )
-    if recording.status != "ready":
+    if recording.status not in {"ready", "error", "completed"}:
+        logger.warning(
+            "Processing request rejected: recording_id=%d unexpected status=%s",
+            recording_id,
+            recording.status,
+        )
         raise bad_request(
-            f"Recording {recording_id} is not ready for processing (status='{recording.status}'). "
-            "Upload and finalize audio first."
+            f"Recording {recording_id} is not ready for processing retry "
+            f"(status='{recording.status}'). Upload and finalize audio first."
         )
 
     try:
         result = await process_recording(db, recording_id, language=request.language)
     except ProcessingError as exc:
+        logger.warning("Processing request failed: recording_id=%d detail=%s", recording_id, exc)
         raise bad_request(str(exc)) from exc
+
+    logger.info("Processing request completed: recording_id=%d status=%s", recording_id, result.status)
 
     return result
 
@@ -247,6 +264,7 @@ def delete_recording(recording_id: int, db: Session = Depends(get_db)) -> Respon
         raise not_found("Recording", recording_id)
 
     audio_path = Path(recording.audio_file_path)
+    chunk_dir = audio_path.with_name(f"{audio_path.stem}_chunks")
 
     db.delete(recording)
     db.commit()
@@ -259,5 +277,12 @@ def delete_recording(recording_id: int, db: Session = Depends(get_db)) -> Respon
             logger.info("Removed audio file %s", audio_path)
         except OSError as exc:
             logger.warning("Could not remove audio file %s: %s", audio_path, exc)
+
+    if chunk_dir.exists() and chunk_dir.is_dir():
+        try:
+            shutil.rmtree(chunk_dir)
+            logger.info("Removed VAD chunk directory %s", chunk_dir)
+        except OSError as exc:
+            logger.warning("Could not remove VAD chunk directory %s: %s", chunk_dir, exc)
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)

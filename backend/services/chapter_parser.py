@@ -26,11 +26,14 @@ def parse_llm_chapters(llm_chapters: list[dict]) -> list[dict]:
         ``transcription`` (str).  Missing fields are filled with safe defaults.
     """
     result = []
-    for ch in llm_chapters:
-        chapter_number = ch.get("chapter_number", 1)
+    for index, ch in enumerate(llm_chapters, start=1):
+        chapter_number = ch.get("chapter_number") or index
+        transcription = str(ch.get("transcription") or "").strip()
+        if not transcription:
+            continue
         result.append({
             "chapter_number": chapter_number,
-            "title": ch.get("title", f"Chapter {chapter_number}"),
-            "transcription": ch.get("transcription", ""),
+            "title": ch.get("title") or f"Chapter {chapter_number}",
+            "transcription": transcription,
         })
     return result
