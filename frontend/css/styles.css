@@ -501,8 +501,51 @@ input:focus, textarea:focus {
 }
 
 .inline-chapter-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
   font-weight: 700;
-  margin-bottom: 0.65rem;
+}
+
+.inline-chapter-details > .inline-chapter-title {
+  cursor: pointer;
+  list-style: none;
+}
+
+.inline-chapter-details > .inline-chapter-title::-webkit-details-marker {
+  display: none;
+}
+
+.inline-chapter-details > .inline-chapter-title::before {
+  content: "▶";
+  color: var(--color-primary);
+  font-size: 0.72rem;
+  transition: transform var(--transition);
+}
+
+.inline-chapter-details[open] > .inline-chapter-title::before {
+  transform: rotate(90deg);
+}
+
+.inline-chapter-title-text {
+  min-width: 0;
+}
+
+.inline-chapter-details-hint {
+  white-space: nowrap;
+}
+
+.inline-chapter-details[open] .inline-chapter-details-hint {
+  font-size: 0;
+}
+
+.inline-chapter-details[open] .inline-chapter-details-hint::after {
+  content: "hide chapter";
+  font-size: 0.75rem;
+}
+
+.inline-chapter-details-body {
+  margin-top: 0.65rem;
 }
 
 .inline-chapter-block {
@@ -1292,22 +1335,17 @@ input:focus, textarea:focus {
 
 .mermaid-diagram svg {
   display: block;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0 !important;
+  width: max-content;
+  max-width: none;
+  min-width: 920px;
   height: auto;
   margin: 0 auto;
   filter: drop-shadow(0 10px 16px rgba(31, 41, 85, 0.08));
 }
 
-.mermaid-diagram:not(.mermaid-diagram-modal) {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
 .mermaid-diagram:not(.mermaid-diagram-modal) svg {
-  flex: 1 1 auto;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 body.has-mermaid-modal {

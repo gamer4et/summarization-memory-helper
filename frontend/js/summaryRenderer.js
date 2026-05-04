@@ -197,7 +197,10 @@ function prepareMermaidSvg(container) {
     const [, , width, height] = viewBox.split(/\s+/).map(Number);
     if (Number.isFinite(width)) {
       svg.dataset.viewBoxWidth = String(width);
-      svg.style.minWidth = `${Math.max(width, 920)}px`;
+      const targetWidth = Math.max(width, 920);
+      svg.style.width = `${targetWidth}px`;
+      svg.style.minWidth = `${targetWidth}px`;
+      svg.style.maxWidth = "none";
     }
     if (Number.isFinite(height)) svg.dataset.viewBoxHeight = String(height);
   }
@@ -359,8 +362,8 @@ function splitFlowchartSubgraphs(diagram) {
   const headerIndex = lines.findIndex((line) => /^(flowchart|graph)\b/i.test(line.trim()));
   if (headerIndex < 0) return [diagram];
 
-  const header = lines[headerIndex].trim();
-  const prefix = lines.slice(0, headerIndex + 1);
+  const header = normalizeFlowchartHeader(lines[headerIndex].trim());
+  const prefix = [...lines.slice(0, headerIndex), header];
   const subgraphs = [];
   let current = null;
   let depth = 0;
@@ -392,12 +395,27 @@ function splitFlowchartSubgraphs(diagram) {
 
   if (current?.length) subgraphs.push(current.join("\n").trim());
 
-  // Independent top-level subgraphs are rendered by Mermaid side-by-side in a
-  // single wide SVG. Split them into separate frames so they stack vertically
-  // and each graph can use the full summary width.
-  if (subgraphs.length <= 1 || outsideContent.length) return [diagram];
+  // Top-level subgraphs are rendered by Mermaid side-by-side in a single wide
+  // SVG. Split them into separate frames so each graph is horizontal by itself
+  // and the frames stack vertically in the summary.
+  if (subgraphs.length <= 1) return [normalizeFlowchartDirection(diagram)];
 
   return subgraphs.map((subgraph) => [...prefix, subgraph].join("\n").trim());
+}
+
+function normalizeFlowchartDirection(diagram) {
+  const lines = String(diagram ?? "").split(/\r?\n/);
+  const headerIndex = lines.findIndex((line) => /^(flowchart|graph)\b/i.test(line.trim()));
+  if (headerIndex < 0) return diagram;
+
+  lines[headerIndex] = normalizeFlowchartHeader(lines[headerIndex].trim());
+  return lines.join("\n").trim();
+}
+
+function normalizeFlowchartHeader(header) {
+  if (/^(flowchart|graph)\s+(LR|RL)\b/i.test(header)) return header;
+  if (/^graph\b/i.test(header)) return header.replace(/^graph(?:\s+\w+)?/i, "graph LR");
+  return header.replace(/^flowchart(?:\s+\w+)?/i, "flowchart LR");
 }
 
 function isMermaidDiagramStart(line) {
@@ -442,7 +460,8 @@ function normalizeMermaidKey(diagram) {
 }
 
 export function repairMermaidDiagram(diagram) {
-  const lines = String(diagram ?? "")
+  const normalizedDiagram = normalizeFlowchartDirection(diagram);
+  const lines = String(normalizedDiagram ?? "")
     .replace(/\s+$/g, "")
     .split(/\r?\n/)
     .map(repairMermaidEdgeLabels);

@@ -3,7 +3,7 @@ Async HTTP client for the OpenRouter API.
 
 Three functions are exposed:
 
-``transcribe_audio(audio_path, language)``
+``transcribe_audio(audio_path, language, previous_context)``
     Reads a WAV file, encodes it as base64, and sends it to the
     OpenRouter chat/completions endpoint using a multimodal LLM.
     Returns a dict with the key ``full_transcription`` only.
@@ -101,20 +101,35 @@ def _calculate_transcription_timeout(audio_size_bytes: int) -> httpx.Timeout:
 # System prompts for transcription and global chapter detection
 # ---------------------------------------------------------------------------
 
-TRANSCRIPTION_SYSTEM_PROMPT = """You are a precise audio transcription assistant.
-Your only task is to transcribe the spoken audio accurately in the language provided.
+TRANSCRIPTION_SYSTEM_PROMPT = """You are a precise audio transcription and light cleanup assistant.
+Your task is to transcribe the primary speaker's speech accurately in the language provided.
 
 Do not summarize.
 Do not analyze topics.
 Do not detect chapters.
 Do not split the result into sections.
 
+Speaker and noise rules:
+1. Transcribe only the main/nearest speaker who is giving the book notes.
+2. Ignore background voices, side conversations, accidental interruptions, playback echo, TV/radio, and other secondary speakers unless the main speaker clearly repeats or responds to them as part of the note.
+
+Context rules:
+1. You may receive previous transcript context from earlier audio fragments.
+2. Use previous context only to resolve unclear words, names, terms, grammar, and continuity.
+3. Do not copy previous context into the answer. Return only speech contained in the current audio fragment.
+
+Light cleanup rules:
+1. Remove obvious ASR/speech glitches that are not meaningful content: duplicated filler fragments, accidental syllables, repeated conjunctions, false starts, and nonsense insertions caused by stutter or recognition artifacts.
+2. Example: if the intended phrase is "гипотезы и догадки", do not output artifacts like "гипотезы и га и догадки".
+3. Keep the speaker's meaning, terminology, order of ideas, and wording as close to the audio as possible.
+4. Do not rewrite into a polished summary. Do not add facts. Do not silently replace uncertain terms with unrelated guesses.
+5. Preserve explicit spoken chapter marker words as normal text if they are present.
+
 Return a JSON object with this exact structure:
 {
     "full_transcription": "complete transcription of all speech in this audio fragment"
 }
-
-Keep spoken chapter marker words in the transcription as normal text if they are present."""
+"""
 
 
 TRANSCRIPTION_RESPONSE_FORMAT: dict = {
@@ -240,14 +255,18 @@ def _parse_strict_llm_json_object(raw_content: str, label: str) -> dict:
     wait=wait_exponential(multiplier=2, min=5, max=30),
     reraise=True,
 )
-async def transcribe_audio(audio_path: str | Path, language: str = "ru") -> dict:
+async def transcribe_audio(
+    audio_path: str | Path,
+    language: str = "ru",
+    previous_context: str = "",
+) -> dict:
     """
     Transcribe a WAV audio file via a multimodal LLM on OpenRouter.
 
     The audio is base64-encoded and passed in the messages array alongside a
-    system prompt that instructs the model to transcribe only. Chapter analysis
-    is performed later on the concatenated transcript, so raw audio chunks do
-    not become chapters.
+    system prompt that instructs the model to transcribe only, lightly removing
+    obvious speech/ASR glitches. Chapter analysis is performed later on the
+    concatenated transcript, so raw audio chunks do not become chapters.
 
     Automatically retries up to 2 times on 5xx server errors and transient
     network/timeouts, including write timeouts while uploading large payloads.
@@ -261,6 +280,9 @@ async def transcribe_audio(audio_path: str | Path, language: str = "ru") -> dict
     language:
         BCP-47 language code (e.g. ``"ru"``, ``"en"``) or ``"auto"`` for
         automatic detection.
+    previous_context:
+        Previous transcript text from earlier chunks. Used only as context for
+        resolving unclear words in the current audio fragment.
 
     Returns
     -------
@@ -304,6 +326,20 @@ async def transcribe_audio(audio_path: str | Path, language: str = "ru") -> dict
     # Encode the WAV file as base64.
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
 
+    context_text = str(previous_context or "").strip()
+    text_instruction = (
+        f"Transcribe this audio fragment. The language spoken is: {language}. "
+        "Return JSON as specified. Do not detect chapters or summarize. "
+        "Use the previous transcript context, if provided, only to resolve unclear words. "
+        "Return only speech from the current audio fragment."
+    )
+    if context_text:
+        text_instruction += (
+            "\n\nPrevious transcript context from earlier fragments "
+            "(do not include it in your answer):\n"
+            f"```\n{context_text}\n```"
+        )
+
     messages = [
         {
             "role": "system",
@@ -321,10 +357,7 @@ async def transcribe_audio(audio_path: str | Path, language: str = "ru") -> dict
                 },
                 {
                     "type": "text",
-                    "text": (
-                        f"Transcribe this audio fragment. The language spoken is: {language}. "
-                        "Return JSON as specified. Do not detect chapters or summarize."
-                    ),
+                    "text": text_instruction,
                 },
             ],
         },

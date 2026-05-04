@@ -40,6 +40,8 @@ _MIN_AUDIO_BYTES = settings.audio.min_transcription_audio_bytes
 
 logger = logging.getLogger(__name__)
 
+_TRANSCRIPTION_CONTEXT_CHARS = 4_000
+
 
 def _chunk_dir_for_audio(audio_path: Path) -> Path:
     return audio_path.with_name(f"{audio_path.stem}_chunks")
@@ -83,7 +85,12 @@ async def _transcribe_recording_audio(audio_path: Path, language: str) -> dict:
             audio_path.name,
             chunk_size,
         )
-        result = await transcribe_audio(chunk_path, language=language)
+        previous_context = "\n\n".join(full_parts)[-_TRANSCRIPTION_CONTEXT_CHARS:]
+        result = await transcribe_audio(
+            chunk_path,
+            language=language,
+            previous_context=previous_context,
+        )
         chunk_full = str(result.get("full_transcription") or "").strip()
         if chunk_full:
             full_parts.append(chunk_full)

@@ -44,10 +44,13 @@ openrouter:
       1. Use only facts from `{{TEXT}}`. Do not use external knowledge or invent facts.
       2. Quote text verbatim in quotation marks «...» and in the original language. Do not paraphrase inside quotation marks.
       3. Headings and explanations must use `{{LANGUAGE}}`.
-      4. If the selected mode has no data in the text, keep the section with `—` and a short reason.
-      5. Resolve pronouns and synonyms: one entity must have one consistent name throughout the output.
-      6. If the text is long, mentally split it into semantic blocks, extract per block, then aggregate.
-      7. Output only sections for selected modes. Do not add introductions, afterwords, or self-explanations.
+       4. If the selected mode has no data in the text, keep the section with `—` and a short reason.
+       5. Resolve pronouns and synonyms: one entity must have one consistent name throughout the output.
+       6. If the text is long, mentally split it into semantic blocks, extract per block, then aggregate.
+       7. Output only sections for selected modes. Do not add introductions, afterwords, or self-explanations.
+       8. Treat the source text as an imperfect speech transcript. Before extracting meaning, silently ignore obvious transcription/speech artifacts that do not carry content: accidental syllables, duplicated particles/conjunctions, filler repetitions, false starts, and nonsensical insertions. Example: read `гипотезы и га и догадки` as `гипотезы и догадки`.
+       9. Do not propagate such artifacts into summaries, facts, triples, categories, graph nodes, or explanations. Never invent new content while cleaning artifacts.
+       10. For verbatim quotes, preserve meaningful source wording, but omit tiny obvious glitch fragments only when they would make the quote nonsensical and are clearly not intentional content.
 
       ---
 
@@ -68,13 +71,13 @@ openrouter:
       - The text is narrative/descriptive without structural relationships.
 
       If a graph is appropriate, output it as the final section under the heading `## Граф связей`
-      in a fenced Markdown code block marked as `mermaid`, using `flowchart LR` or `flowchart TD`
-      (process/hierarchy — TD; relationships between entities — LR). Requirements:
+      in fenced Markdown code block(s) marked as `mermaid`, using only `flowchart LR` so graphs are horizontal. Requirements:
 
       - 5–15 nodes.
       - Edge labels are 1–3 words describing the relationship type.
       - Node IDs use Latin characters without spaces; displayed names are in square brackets: `A["Name"]`.
-      - Group similar entities with `subgraph` if there are 2+ groups.
+      - If there are several independent groups, output several separate `mermaid` code blocks one after another instead of placing multiple top-level `subgraph` groups in one diagram.
+      - Do not use `flowchart TD`; even processes and hierarchies must stay horizontal with `flowchart LR`.
 
       If a graph is not appropriate, do not add the section and do not explain why.
 

@@ -256,27 +256,30 @@ function buildInlineChapterHTML(chapter) {
   const summary = chapter.summary?.summary_text || "";
 
   return `
-    <div class="inline-chapter-card">
-      <div class="inline-chapter-title">
+    <details class="inline-chapter-card inline-chapter-details">
+      <summary class="inline-chapter-title">
         <span class="chunk-badge">Chapter ${chapter.chapter_number}</span>
-        ${escHtml(title)}
+        <span class="inline-chapter-title-text">${escHtml(title)}</span>
+        <span class="details-hint inline-chapter-details-hint">show chapter</span>
+      </summary>
+      <div class="inline-chapter-details-body">
+        ${summary ? `
+          <div class="inline-chapter-block inline-summary-block">
+            <div class="inline-summary-heading">
+              <strong>Summary</strong>
+              <span class="summary-format-badge">Markdown</span>
+            </div>
+            <div class="summary-markdown inline-summary-markdown">${renderSummaryWithTranscriptGraphs(summary, transcription)}</div>
+          </div>` : ""}
+        <details class="inline-chapter-block transcription-details inline-transcription-details">
+          <summary>
+            <span>Transcription</span>
+            <span class="details-hint">show raw transcript</span>
+          </summary>
+          <pre>${escHtml(transcription)}</pre>
+        </details>
       </div>
-      ${summary ? `
-        <div class="inline-chapter-block inline-summary-block">
-          <div class="inline-summary-heading">
-            <strong>Summary</strong>
-            <span class="summary-format-badge">Markdown</span>
-          </div>
-          <div class="summary-markdown inline-summary-markdown">${renderSummaryWithTranscriptGraphs(summary, transcription)}</div>
-        </div>` : ""}
-      <details class="inline-chapter-block transcription-details inline-transcription-details">
-        <summary>
-          <span>Transcription</span>
-          <span class="details-hint">show raw transcript</span>
-        </summary>
-        <pre>${escHtml(transcription)}</pre>
-      </details>
-    </div>
+    </details>
   `;
 }
 
