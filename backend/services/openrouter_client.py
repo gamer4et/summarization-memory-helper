@@ -17,6 +17,10 @@ Three functions are exposed:
     Sends a chapter text to the OpenRouter chat/completions endpoint.
     Returns the LLM-generated summary string.
 
+``generate_chapter_tests(text, chapter_title, target_count)``
+    Sends a chapter transcription to a text LLM and returns stored multiple-choice
+    questions focused on essential understanding rather than minor details.
+
 Both functions raise :class:`httpx.HTTPStatusError` on 4xx/5xx responses and
 :class:`OpenRouterError` for unexpected response shapes.
 """
@@ -199,6 +203,87 @@ CHAPTER_ANALYSIS_RESPONSE_FORMAT: dict = {
                 },
             },
             "required": ["chapters"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+CHAPTER_TESTS_SYSTEM_PROMPT = """You are an educational test designer for book learning and spaced repetition.
+Create multiple-choice questions from one chapter transcription.
+
+Question quality rules:
+1. Test essential understanding: central ideas, causal links, definitions, trade-offs, frameworks, examples that reveal a concept, and practical implications.
+2. Do not test tiny details, dates, names, wording trivia, or accidental transcription artifacts unless they are central to the chapter's argument.
+3. Each question must be answerable from the supplied transcription only.
+4. Each question must have exactly four options and exactly one correct option.
+5. Distractors must be plausible but clearly wrong if the chapter is understood.
+6. Explanations must briefly explain why the correct answer follows from the chapter.
+7. For every incorrect option, generate a separate short explanation of why that specific option is wrong.
+8. Use an empty string for the correct option's option_explanations item.
+9. Use the same language as the chapter unless the user explicitly says otherwise.
+
+Return a JSON object with this exact structure:
+{
+  "questions": [
+    {
+      "question": "question text",
+      "options": ["answer A", "answer B", "answer C", "answer D"],
+      "correct_option_index": 0,
+      "explanation": "short explanation",
+      "option_explanations": ["", "why answer B is wrong", "why answer C is wrong", "why answer D is wrong"],
+      "difficulty": "easy|medium|hard",
+      "concept_tags": ["tag one", "tag two"]
+    }
+  ]
+}
+"""
+
+
+CHAPTER_TESTS_RESPONSE_FORMAT: dict = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "chapter_tests",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string"},
+                            "options": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "correct_option_index": {"type": "integer"},
+                            "explanation": {"type": "string"},
+                            "option_explanations": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "difficulty": {"type": "string"},
+                            "concept_tags": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": [
+                            "question",
+                            "options",
+                            "correct_option_index",
+                            "explanation",
+                            "option_explanations",
+                            "difficulty",
+                            "concept_tags",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["questions"],
             "additionalProperties": False,
         },
     },
@@ -555,6 +640,81 @@ async def summarize_text(text: str) -> str:
 
     logger.info("Summarization complete: %d chars", len(summary))
     return summary
+
+
+@retry(
+    retry=retry_if_exception(_is_retriable_error),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=5, max=30),
+    reraise=True,
+)
+async def generate_chapter_tests(
+    text: str,
+    chapter_title: str = "",
+    target_count: int = 10,
+) -> dict:
+    """Generate essence-focused multiple-choice tests for one chapter."""
+    transcript = str(text or "").strip()
+    if not transcript:
+        raise ValueError("Cannot generate tests for an empty chapter transcription.")
+
+    count = max(1, min(int(target_count or 10), 30))
+    s = settings.openrouter.summarization
+    logger.info(
+        "Generating %d chapter test question(s): %d chars, model=%s",
+        count,
+        len(transcript),
+        s.model,
+    )
+
+    payload: dict = {
+        "model": s.model,
+        "messages": [
+            {"role": "system", "content": CHAPTER_TESTS_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Chapter title: {chapter_title or 'Untitled chapter'}\n"
+                    f"Target number of questions: {count}\n\n"
+                    "Generate multiple-choice questions from this transcription. "
+                    "Prioritize conceptual understanding and useful repetition, not minor details.\n\n"
+                    f"{transcript}"
+                ),
+            },
+        ],
+        "response_format": CHAPTER_TESTS_RESPONSE_FORMAT,
+        "max_tokens": s.max_tokens,
+        "temperature": 0.2,
+    }
+
+    headers = {**_auth_headers(), "Content-Type": "application/json"}
+
+    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        response = await client.post(
+            f"{_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+        )
+
+    _log_response(response, "chapter tests")
+    response.raise_for_status()
+
+    body = response.json()
+    try:
+        raw_content: str = body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise OpenRouterError(
+            f"Chapter tests response has unexpected structure: {body!r}"
+        ) from exc
+
+    result = _parse_strict_llm_json_object(raw_content, "Chapter tests")
+    if "questions" not in result or not isinstance(result["questions"], list):
+        raise OpenRouterError(
+            f"Chapter tests JSON missing required 'questions' list: {result!r}"
+        )
+
+    logger.info("Chapter test generation complete: %d question(s)", len(result["questions"]))
+    return result
 
 
 # ---------------------------------------------------------------------------

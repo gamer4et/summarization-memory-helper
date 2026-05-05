@@ -8,6 +8,7 @@
  *   #record?book=<id>    → New recording panel for a book
  *   #record?book=<id>&append=<recording_id> → Continue an existing recording
  *   #chapters?rec=<id>   → Chapter view for a completed recording
+ *   #tests?book=<id>     → Book-level generated quiz/test view
  *
  * Exported globals (used by components)
  * ---------------------------------------
@@ -18,6 +19,7 @@ import { renderBookList }      from "./components/bookList.js";
 import { renderBookDetail }    from "./components/bookDetail.js";
 import { renderRecordingPanel } from "./components/recordingPanel.js";
 import { renderChapterView }   from "./components/chapterView.js";
+import { renderTestView }      from "./components/testView.js";
 import { api }                 from "./api.js";
 
 // ---------------------------------------------------------------------------
@@ -25,7 +27,7 @@ import { api }                 from "./api.js";
 // ---------------------------------------------------------------------------
 
 const state = {
-  /** @type {'books'|'book'|'record'|'chapters'} */
+  /** @type {'books'|'book'|'record'|'chapters'|'tests'} */
   view: "books",
   /** @type {object|null} selected book for recording */
   book: null,
@@ -109,6 +111,49 @@ async function route() {
       onViewResults(recordingId) {
         state.recordingId = recordingId;
         setHash("chapters", { rec: recordingId });
+      },
+      onViewTests(book) {
+        state.book = book;
+        setHash("tests", { book: book.id });
+      },
+    });
+    return;
+  }
+
+  // ── Book tests / quiz view ────────────────────────────────────────────────
+  if (path === "tests") {
+    const bookId = parseInt(params.book, 10);
+    if (!bookId) { setHash("books"); return; }
+
+    if (!state.book || state.book.id !== bookId) {
+      try {
+        state.book = await api.get(`/api/books/${bookId}`);
+      } catch (_) {
+        showToast("Book not found — returning to list.", "error");
+        setHash("books");
+        return;
+      }
+    }
+
+    setBreadcrumb(breadcrumb, [
+      { label: "Books", onClick: () => setHash("books") },
+      { label: state.book.title, onClick: () => setHash("book", { book: state.book.id }) },
+      { label: "Tests" },
+    ]);
+
+    await renderTestView(main, {
+      book: state.book,
+      onBack(bookId) {
+        if (bookId) setHash("book", { book: bookId });
+        else setHash("books");
+      },
+      onBookLoaded(book) {
+        state.book = book;
+        setBreadcrumb(breadcrumb, [
+          { label: "Books", onClick: () => setHash("books") },
+          { label: book.title, onClick: () => setHash("book", { book: book.id }) },
+          { label: "Tests" },
+        ]);
       },
     });
     return;

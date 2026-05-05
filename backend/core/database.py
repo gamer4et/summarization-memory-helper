@@ -6,7 +6,7 @@ import logging
 from contextlib import contextmanager
 from typing import Generator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from backend.core.config import settings
@@ -69,7 +69,21 @@ def create_all_tables() -> None:
     import backend.models.orm  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _ensure_lightweight_schema_updates()
     logger.info("Database tables ensured.")
+
+
+def _ensure_lightweight_schema_updates() -> None:
+    """Apply simple additive schema updates for deployments without migrations."""
+    inspector = inspect(engine)
+    if "chapter_test_options" not in inspector.get_table_names():
+        return
+
+    option_columns = {column["name"] for column in inspector.get_columns("chapter_test_options")}
+    if "wrong_explanation" not in option_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE chapter_test_options ADD COLUMN wrong_explanation TEXT"))
+        logger.info("Added missing chapter_test_options.wrong_explanation column.")
 
 
 # ---------------------------------------------------------------------------

@@ -8,11 +8,14 @@ recordings       A single recording session attached to a book.
 chapters         Detected chapters within one recording.
 transcriptions   Raw transcription text for one chapter.
 summaries        LLM-generated summary for one chapter.
+chapter_test_questions  Generated quiz questions for one chapter.
+chapter_test_options    Multiple-choice answer options for one question.
 """
 
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     Float,
@@ -45,6 +48,12 @@ class Book(Base):
         back_populates="book",
         cascade="all, delete-orphan",
         lazy="select",
+    )
+    test_generation_state = relationship(
+        "BookTestGenerationState",
+        back_populates="book",
+        uselist=False,
+        cascade="all, delete-orphan",
     )
 
     def __repr__(self) -> str:
@@ -105,6 +114,13 @@ class Chapter(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    test_questions = relationship(
+        "ChapterTestQuestion",
+        back_populates="chapter",
+        cascade="all, delete-orphan",
+        lazy="select",
+        order_by="ChapterTestQuestion.id",
+    )
 
     def __repr__(self) -> str:
         return (
@@ -145,3 +161,81 @@ class Summary(Base):
 
     def __repr__(self) -> str:
         return f"<Summary id={self.id} chapter_id={self.chapter_id} model={self.model_used!r}>"
+
+
+class BookTestGenerationState(Base):
+    __tablename__ = "book_test_generation_states"
+
+    id = Column(Integer, primary_key=True, index=True)
+    book_id = Column(Integer, ForeignKey("books.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    status = Column(String(32), nullable=False, default="idle")
+    chapter_id = Column(Integer, ForeignKey("chapters.id", ondelete="SET NULL"), nullable=True)
+    target_count = Column(Integer, nullable=False, default=10)
+    replace_existing = Column(Boolean, nullable=False, default=True)
+    generated_questions = Column(Integer, nullable=False, default=0)
+    error_message = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    book = relationship("Book", back_populates="test_generation_state")
+
+    def __repr__(self) -> str:
+        return f"<BookTestGenerationState book_id={self.book_id} status={self.status!r}>"
+
+
+class ChapterTestQuestion(Base):
+    __tablename__ = "chapter_test_questions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    chapter_id = Column(
+        Integer, ForeignKey("chapters.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    question_text = Column(Text, nullable=False)
+    explanation = Column(Text, nullable=False)
+    difficulty = Column(String(32), nullable=False, default="medium")
+    concept_tags = Column(Text, nullable=False, default="")
+    model_used = Column(String(256), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    chapter = relationship("Chapter", back_populates="test_questions")
+    options = relationship(
+        "ChapterTestOption",
+        back_populates="question",
+        cascade="all, delete-orphan",
+        lazy="select",
+        order_by="ChapterTestOption.display_order",
+    )
+
+    def __repr__(self) -> str:
+        preview = (self.question_text or "")[:40]
+        return f"<ChapterTestQuestion id={self.id} chapter_id={self.chapter_id} text={preview!r}>"
+
+
+class ChapterTestOption(Base):
+    __tablename__ = "chapter_test_options"
+
+    id = Column(Integer, primary_key=True, index=True)
+    question_id = Column(
+        Integer,
+        ForeignKey("chapter_test_questions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    option_text = Column(Text, nullable=False)
+    is_correct = Column(Boolean, nullable=False, default=False)
+    wrong_explanation = Column(Text, nullable=True)
+    display_order = Column(Integer, nullable=False, default=0)
+
+    question = relationship("ChapterTestQuestion", back_populates="options")
+
+    def __repr__(self) -> str:
+        return (
+            f"<ChapterTestOption id={self.id} question_id={self.question_id} "
+            f"correct={self.is_correct}>"
+        )

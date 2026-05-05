@@ -106,6 +106,35 @@ export function processRecording(recordingId, language = "ru") {
   return request("POST", `/api/recordings/${recordingId}/process`, { language });
 }
 
+/** @param {number} bookId */
+export function getBookTestAvailability(bookId) {
+  return request("GET", `/api/books/${bookId}/tests/availability`);
+}
+
+/**
+ * @param {number} bookId
+ * @param {{chapter_id?: number|null, target_count?: number, replace_existing?: boolean}} payload
+ */
+export function generateBookTests(bookId, payload = {}) {
+  return request("POST", `/api/books/${bookId}/tests/generate`, payload);
+}
+
+/**
+ * @param {number} bookId
+ * @param {{chapter_id?: number|null, sample_size?: number}} payload
+ */
+export function sampleBookTests(bookId, payload = {}) {
+  return request("POST", `/api/books/${bookId}/tests/sample`, payload);
+}
+
+/**
+ * @param {number} bookId
+ * @param {Array<{question_id: number, option_id: number}>} answers
+ */
+export function submitBookTests(bookId, answers) {
+  return request("POST", `/api/books/${bookId}/tests/submit`, { answers });
+}
+
 /**
  * Upload one complete browser-recorded audio session for offline decode + VAD.
  *

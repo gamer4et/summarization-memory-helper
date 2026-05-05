@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.api.books import router as books_router
 from backend.api.recordings import router as recordings_router
+from backend.api.tests import router as tests_router
 from backend.api.websocket_audio import router as ws_router
 from backend.core.config import settings
 from backend.core.database import create_all_tables
@@ -161,6 +162,7 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------ #
     app.include_router(books_router)
     app.include_router(recordings_router)
+    app.include_router(tests_router)
     app.include_router(ws_router)
 
     # ------------------------------------------------------------------ #

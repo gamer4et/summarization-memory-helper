@@ -119,6 +119,114 @@ class FullChapterOut(ChapterOut):
     summary: Optional[SummaryOut] = None
 
 
+# ---------------------------------------------------------------------------
+# Chapter tests / quizzes
+# ---------------------------------------------------------------------------
+
+
+class TestGenerationRequest(BaseModel):
+    """Generate multiple-choice tests from stored chapter transcriptions."""
+
+    chapter_id: Optional[int] = None
+    target_count: int = Field(10, ge=1, le=30)
+    replace_existing: bool = True
+
+
+class TestSampleRequest(BaseModel):
+    """Create a quiz sample from generated tests."""
+
+    chapter_id: Optional[int] = None
+    sample_size: int = Field(10, ge=1, le=100)
+
+
+class TestAnswerIn(BaseModel):
+    question_id: int
+    option_id: int
+
+
+class TestSubmitRequest(BaseModel):
+    answers: List[TestAnswerIn]
+
+
+class TestOptionOut(_ORMBase):
+    id: int
+    question_id: int
+    option_text: str
+    display_order: int
+
+
+class TestQuestionOut(_ORMBase):
+    id: int
+    chapter_id: int
+    question_text: str
+    difficulty: str
+    concept_tags: str
+    created_at: datetime
+    options: List[TestOptionOut] = []
+
+
+class ChapterTestAvailabilityOut(BaseModel):
+    chapter_id: int
+    recording_id: int
+    chapter_number: int
+    chapter_title: Optional[str]
+    recording_status: str
+    has_transcription: bool
+    question_count: int
+
+
+class TestGenerationStateOut(BaseModel):
+    status: str
+    chapter_id: Optional[int]
+    target_count: int
+    replace_existing: bool
+    generated_questions: int
+    error_message: Optional[str]
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    updated_at: datetime
+
+
+class BookTestAvailabilityOut(BaseModel):
+    book_id: int
+    total_questions: int
+    chapters: List[ChapterTestAvailabilityOut]
+    generation_state: Optional[TestGenerationStateOut] = None
+
+
+class TestGenerationResultOut(BaseModel):
+    book_id: int
+    generated_questions: int
+    total_questions: int
+    chapters: List[ChapterTestAvailabilityOut]
+    generation_state: Optional[TestGenerationStateOut] = None
+
+
+class TestSampleOut(BaseModel):
+    book_id: int
+    requested_size: int
+    returned_size: int
+    chapter_id: Optional[int]
+    questions: List[TestQuestionOut]
+
+
+class TestSubmissionQuestionResultOut(BaseModel):
+    question_id: int
+    selected_option_id: Optional[int]
+    correct_option_id: int
+    is_correct: bool
+    question_text: str
+    explanation: str
+    wrong_explanation: Optional[str] = None
+
+
+class TestSubmissionResultOut(BaseModel):
+    total: int
+    correct: int
+    score_percent: float
+    results: List[TestSubmissionQuestionResultOut]
+
+
 class RecordingDetailOut(RecordingOut):
     """Recording with full chapter tree including a browser-playable audio URL."""
 
@@ -156,3 +264,4 @@ class WSStatusMessage(BaseModel):
 # Resolve forward references
 BookWithRecordingsOut.model_rebuild()
 RecordingDetailOut.model_rebuild()
+TestQuestionOut.model_rebuild()

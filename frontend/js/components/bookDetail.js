@@ -6,7 +6,7 @@
  * a new empty recording session.
  *
  * Exported:
- *   renderBookDetail(container, { bookId, onBack, onNewRecording, onContinueRecording, onViewResults })
+ *   renderBookDetail(container, { bookId, onBack, onNewRecording, onContinueRecording, onViewResults, onViewTests })
  */
 
 import { api, ApiError, processRecording } from "../api.js";
@@ -22,12 +22,13 @@ import { renderMermaidDiagrams, renderSummaryWithTranscriptGraphs } from "../sum
  * @param {(book: object) => void} opts.onNewRecording
  * @param {(book: object, recordingId: number) => void} opts.onContinueRecording
  * @param {(recordingId: number) => void} opts.onViewResults
+ * @param {(book: object) => void} opts.onViewTests
  */
 export async function renderBookDetail(
   container,
   options
 ) {
-  const { bookId, onBack, onBookLoaded, onNewRecording, onContinueRecording, onViewResults } = options;
+  const { bookId, onBack, onBookLoaded, onNewRecording, onContinueRecording, onViewResults, onViewTests } = options;
 
   container.innerHTML = `
     <div class="loading-spinner">
@@ -59,6 +60,9 @@ export async function renderBookDetail(
   container.querySelector("#btn-back")?.addEventListener("click", onBack);
   container.querySelector("#btn-new-recording")?.addEventListener("click", () => {
     onNewRecording(book);
+  });
+  container.querySelector("#btn-book-tests")?.addEventListener("click", () => {
+    onViewTests?.(book);
   });
 
   container.querySelectorAll("[data-action='view-results']").forEach((btn) => {
@@ -160,7 +164,10 @@ function buildBookDetailHTML(book) {
             Added ${formatDate(book.created_at)} · ${recordings.length} recording(s)
           </div>
         </div>
-        <button class="btn-primary" id="btn-new-recording">🎙 New Recording</button>
+        <div class="book-detail-header-actions">
+          <button class="btn-ghost" id="btn-book-tests">🧠 Tests</button>
+          <button class="btn-primary" id="btn-new-recording">🎙 New Recording</button>
+        </div>
       </div>
 
       <section class="book-results-section">
