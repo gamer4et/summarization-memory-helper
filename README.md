@@ -9,7 +9,8 @@ You create a book, record yourself retelling or discussing it, say a chapter mar
 - a decoded diagnostic WAV file;
 - a VAD-filtered WAV file used for transcription;
 - chapter-level transcriptions;
-- chapter-level AI summaries.
+- chapter-level AI summaries;
+- optional generated multiple-choice tests and quiz results for completed chapters.
 
 The app is intentionally simple: one FastAPI backend serves both the API and the static vanilla-JS frontend. Docker is the recommended way to run it.
 
@@ -21,6 +22,7 @@ The app is intentionally simple: one FastAPI backend serves both the API and the
   - [What you need](#what-you-need)
   - [Quick start with Docker](#quick-start-with-docker)
   - [How to use the app](#how-to-use-the-app)
+  - [Generated tests and quiz sessions](#generated-tests-and-quiz-sessions)
   - [Where your data is stored](#where-your-data-is-stored)
   - [Changing models and settings](#changing-models-and-settings)
   - [Running without Docker](#running-without-docker)
@@ -36,6 +38,7 @@ The app is intentionally simple: one FastAPI backend serves both the API and the
   - [API surface](#api-surface)
   - [Configuration model](#configuration-model)
   - [Runtime files](#runtime-files)
+  - [Developer tests](#developer-tests)
 
 ---
 
@@ -133,6 +136,7 @@ Your recordings and database stay in `data/` on your machine.
    - “new chapter”
    - “chapter two”
    - “next chapter”
+   - “глава один”
 9. Use **Pause** and **Resume** if needed. Paused time is not included in the final browser audio blob.
 10. Click **Stop & Process**.
 11. Wait while the app:
@@ -144,6 +148,8 @@ Your recordings and database stay in `data/` on your machine.
     - summarizes each chapter;
     - saves the result.
 12. Review the chapter view with the audio player, transcription, and summary.
+13. If you need to add more spoken notes to an existing recording, use the recording continuation flow in the book detail view. The app uploads a new browser audio blob, appends it to the existing recording, rebuilds decoded/VAD audio, and reprocesses the full combined recording.
+14. After at least one recording is completed, open the test view to generate multiple-choice questions from stored chapter transcriptions and run quiz sessions.
 
 ```mermaid
 flowchart TD
@@ -154,6 +160,39 @@ flowchart TD
     E --> F[Stop and process]
     F --> G[Backend filters, transcribes, and summarizes]
     G --> H[Read chapter transcriptions and summaries]
+    H --> I[Optionally append more audio and reprocess]
+    H --> J[Generate tests and take quizzes]
+```
+
+---
+
+## Generated tests and quiz sessions
+
+Completed chapters with non-empty transcriptions can be converted into persistent multiple-choice tests.
+
+Typical workflow:
+
+1. Process at least one recording until its status is `completed`.
+2. Open **Tests** for the book.
+3. Choose a scope:
+   - all completed chapters;
+   - one specific completed chapter.
+4. Set how many questions to generate per chapter. The API accepts `1` to `30`; the UI default is `10`.
+5. Click **Generate tests**. Existing questions in the selected scope are replaced by default.
+6. Choose a quiz sample size. The API accepts `1` to `100`; the UI default is up to `10`.
+7. Click **Start quiz**, answer all sampled questions, and submit.
+8. Review the score, the correct option, and the explanation for wrong answers.
+
+Test generation uses the configured OpenRouter summarization model. Generated tests are stored in SQLite, so they remain available after restarting the container.
+
+```mermaid
+flowchart LR
+    A[Completed chapters] --> B[Stored transcriptions]
+    B --> C[Generate tests]
+    C --> D[Chapter test questions]
+    D --> E[Quiz sample]
+    E --> F[Submit answers]
+    F --> G[Score and explanations]
 ```
 
 ---
@@ -194,10 +233,14 @@ Important settings:
 ```yaml
 audio:
   sample_rate: 16000
-  vad_aggressiveness: 0
+  frame_duration_ms: 30
+  vad_aggressiveness: 2
+  min_speech_duration_ms: 100
+  max_silence_ms: 500
   raw_storage_dir: "./data/raw_audio"
   vad_storage_dir: "./data/vad_audio"
   decoded_storage_dir: "./data/decoded_audio"
+  min_transcription_audio_bytes: 32044
 
 openrouter:
   transcription:
@@ -205,6 +248,11 @@ openrouter:
     default_language: "ru"
   summarization:
     model: "google/gemini-3.1-pro-preview"
+    max_tokens: 512000
+    temperature: 0.1
+    default_modes: "dense_summary, key_facts, triples, quotes, categories"
+    language: "auto"
+    density_iterations: 3
 ```
 
 Use `.env` for secrets and local overrides. At minimum, set:
@@ -218,6 +266,7 @@ You can also override nested settings with environment variables. For example:
 ```dotenv
 OPENROUTER__SUMMARIZATION__MODEL=google/gemini-3.1-pro-preview
 AUDIO__VAD_AGGRESSIVENESS=1
+OPENROUTER__SUMMARIZATION__DEFAULT_MODES=dense_summary,key_facts
 ```
 
 ---
@@ -317,6 +366,13 @@ Try again with:
 - Update the summarization system prompt in `config/settings.yaml`.
 - Use a stronger OpenRouter model for summarization.
 
+### Test generation fails
+
+- Make sure the book has at least one `completed` recording.
+- Make sure completed chapters have non-empty transcriptions.
+- Check the OpenRouter API key and summarization model, because the test generator uses the summarization model.
+- Try generating fewer questions per chapter.
+
 ### Port 8000 is already in use
 
 Stop the other process or change the port mapping in `docker-compose.yml`.
@@ -334,7 +390,9 @@ Stop the other process or change the port mapping in `docker-compose.yml`.
 | Audio | Browser MediaRecorder, FFmpeg, WebRTC VAD |
 | AI | OpenRouter API for transcription and summarization |
 | Frontend | Static HTML, CSS, vanilla JavaScript modules |
+| Rendering | Marked, DOMPurify, Mermaid loaded from CDN in the browser |
 | Configuration | `config/settings.yaml` plus `.env` / environment variables |
+| Tests | Pytest with isolated SQLite databases and monkeypatched OpenRouter calls |
 | Deployment | Dockerfile and Docker Compose |
 
 ---
@@ -348,6 +406,7 @@ summarization-memory-helper/
 │   ├── api/
 │   │   ├── books.py               # Book CRUD endpoints
 │   │   ├── recordings.py          # Recording lifecycle, upload, processing, deletion
+│   │   ├── tests.py               # Generated test and quiz endpoints
 │   │   └── websocket_audio.py     # WebSocket audio route kept in backend API layer
 │   ├── core/
 │   │   ├── config.py              # Settings loading and validation
@@ -363,6 +422,7 @@ summarization-memory-helper/
 │       ├── vad_service.py         # VAD processor wrapper
 │       ├── openrouter_client.py   # OpenRouter transcription and summary calls
 │       ├── chapter_parser.py      # Converts LLM/chapter output to structured chapters
+│       ├── test_generator.py      # Persistent multiple-choice test generation/scoring
 │       └── processor.py           # End-to-end transcription/summarization orchestrator
 ├── frontend/
 │   ├── index.html                 # Static SPA shell
@@ -371,7 +431,9 @@ summarization-memory-helper/
 │       ├── app.js                 # Client-side routing/state
 │       ├── api.js                 # REST upload/client helpers
 │       ├── recorder.js            # Browser MediaRecorder wrapper
+│       ├── summaryRenderer.js     # Safe Markdown/Mermaid summary renderer
 │       └── components/            # UI views
+├── tests/                         # Pytest coverage for audio append and generated tests
 ├── config/settings.yaml           # Non-secret runtime defaults
 ├── data/                          # Local runtime data, ignored by Git
 ├── Dockerfile
@@ -429,6 +491,26 @@ sequenceDiagram
     API-->>UI: Chapters + transcription + summary + audio_url
 ```
 
+Existing recordings can also be extended:
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as Browser SPA
+    participant API as FastAPI REST API
+    participant Audio as Audio pipeline
+    participant DB as SQLite
+
+    User->>UI: Continue an existing recording
+    UI->>API: POST /api/recordings/{id}/audio/append multipart upload
+    API->>Audio: Append raw audio, rebuild decoded WAV, rerun VAD
+    API->>DB: status=ready, processed_at=NULL
+    API-->>UI: RecordingOut
+    UI->>API: POST /api/recordings/{id}/process
+    API->>DB: Replace chapters/transcriptions/summaries for combined audio
+    API-->>UI: Updated RecordingDetailOut
+```
+
 ---
 
 ## Audio processing pipeline
@@ -447,16 +529,18 @@ flowchart LR
     D --> E[data/decoded_audio/:id.wav]
     E --> F[WebRTC VAD]
     F --> G[data/vad_audio/:id.wav]
-    G --> H[OpenRouter transcription]
-    H --> I[Chapter parser]
-    I --> J[OpenRouter summarization]
-    J --> K[SQLite chapters, transcriptions, summaries]
+    G --> H[Optional VAD chunks for long recordings]
+    H --> I[OpenRouter transcription]
+    I --> J[Chapter parser]
+    J --> K[OpenRouter summarization]
+    K --> L[SQLite chapters, transcriptions, summaries]
 ```
 
 Important behavior:
 
 - VAD output is required. The pipeline does not fall back to raw audio if no speech is detected.
 - The browser-playable audio URL points to `/media/audio/{recording_id}.wav`, backed by `data/vad_audio/`.
+- Appending audio rewrites the combined decoded/VAD artifacts for that recording and clears `processed_at` until reprocessing succeeds.
 - Runtime audio directories are created at application startup.
 
 ---
@@ -482,7 +566,9 @@ Important behavior:
   - finalize audio;
   - process transcription/summarization;
   - return detail with chapters;
+  - append audio to an existing recording and rerun VAD;
   - delete recordings.
+- `backend/api/tests.py` owns generated test and quiz endpoints under `/api/books/{book_id}/tests/...`.
 - `backend/api/websocket_audio.py` remains part of the API layer for WebSocket audio handling, but the current UI path uses complete raw upload and offline VAD.
 
 ### Service layer
@@ -492,6 +578,7 @@ Important behavior:
 - `backend/services/vad_service.py` wraps WebRTC VAD frame processing.
 - `backend/services/openrouter_client.py` calls OpenRouter.
 - `backend/services/chapter_parser.py` normalizes chapter output.
+- `backend/services/test_generator.py` generates persistent multiple-choice tests, samples quiz questions, and scores submitted answers.
 - `backend/services/processor.py` coordinates transcription, chapter creation, summaries, and status transitions.
 
 ---
@@ -504,10 +591,12 @@ The frontend has no build step and is served directly by FastAPI.
 - `frontend/js/app.js`: app-level state and client-side view switching.
 - `frontend/js/api.js`: HTTP helpers for JSON requests and multipart audio upload.
 - `frontend/js/recorder.js`: MediaRecorder wrapper that starts, pauses, resumes, stops, and returns the final Blob.
+- `frontend/js/summaryRenderer.js`: safe Markdown renderer for summaries, including Mermaid diagrams.
 - `frontend/js/components/bookList.js`: book list and create-book UI.
 - `frontend/js/components/bookDetail.js`: selected-book details and recording list.
 - `frontend/js/components/recordingPanel.js`: recording workflow UI.
 - `frontend/js/components/chapterView.js`: audio playback, transcription, and summary display.
+- `frontend/js/components/testView.js`: generated test controls, quiz sampling, answer submission, and score display.
 - `frontend/css/styles.css`: visual styling.
 
 ---
@@ -520,6 +609,9 @@ erDiagram
     RECORDING ||--o{ CHAPTER : contains
     CHAPTER ||--|| TRANSCRIPTION : has
     CHAPTER ||--|| SUMMARY : has
+    BOOK ||--o| BOOK_TEST_GENERATION_STATE : tracks
+    CHAPTER ||--o{ CHAPTER_TEST_QUESTION : has
+    CHAPTER_TEST_QUESTION ||--o{ CHAPTER_TEST_OPTION : has
 
     BOOK {
         int id PK
@@ -562,6 +654,40 @@ erDiagram
         string model_used
         datetime created_at
     }
+
+    BOOK_TEST_GENERATION_STATE {
+        int id PK
+        int book_id FK
+        string status
+        int chapter_id FK
+        int target_count
+        bool replace_existing
+        int generated_questions
+        text error_message
+        datetime started_at
+        datetime completed_at
+        datetime updated_at
+    }
+
+    CHAPTER_TEST_QUESTION {
+        int id PK
+        int chapter_id FK
+        text question_text
+        text explanation
+        string difficulty
+        text concept_tags
+        string model_used
+        datetime created_at
+    }
+
+    CHAPTER_TEST_OPTION {
+        int id PK
+        int question_id FK
+        text option_text
+        bool is_correct
+        text wrong_explanation
+        int display_order
+    }
 ```
 
 Recording status lifecycle:
@@ -582,6 +708,7 @@ recording ───────────────────────>
 | --- | --- | --- |
 | `GET` | `/api/health` | Health check |
 | `GET` | `/api/docs` | Swagger UI |
+| `GET` | `/api/redoc` | ReDoc UI |
 | `GET` | `/api/openapi.json` | OpenAPI schema |
 
 ### Books
@@ -600,9 +727,19 @@ recording ───────────────────────>
 | --- | --- | --- |
 | `POST` | `/api/recordings` | Create recording row for a book |
 | `POST` | `/api/recordings/{recording_id}/audio` | Upload complete raw browser audio and run offline VAD |
+| `POST` | `/api/recordings/{recording_id}/audio/append` | Append browser audio to an existing recording and rerun offline VAD |
 | `POST` | `/api/recordings/{recording_id}/process` | Transcribe VAD audio, detect chapters, summarize chapters |
 | `GET` | `/api/recordings/{recording_id}` | Get recording detail with chapters and audio URL |
 | `DELETE` | `/api/recordings/{recording_id}` | Delete recording and associated audio file |
+
+### Generated tests and quizzes
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/books/{book_id}/tests/availability` | List completed chapters, question counts, and generation state |
+| `POST` | `/api/books/{book_id}/tests/generate` | Generate multiple-choice tests from one chapter or all completed chapters |
+| `POST` | `/api/books/{book_id}/tests/sample` | Sample generated questions for a quiz session |
+| `POST` | `/api/books/{book_id}/tests/submit` | Score submitted quiz answers and return explanations |
 
 ### Static runtime media
 
@@ -622,7 +759,7 @@ Configuration is loaded from two places:
 Key groups:
 
 - `audio`: sample rate, frame size, VAD behavior, runtime directories, minimum transcription audio size.
-- `openrouter`: API key plus transcription and summarization model settings.
+- `openrouter`: API key plus transcription, summarization, summary modes, and test-generation model settings.
 - `database`: SQLAlchemy database URL.
 - `app` / root settings: app name and debug behavior.
 
@@ -640,10 +777,28 @@ The application writes runtime state under `data/`:
 | `data/raw_audio/` | raw upload service | Original browser recordings |
 | `data/decoded_audio/` | audio pipeline | Full decoded WAV diagnostics |
 | `data/vad_audio/` | audio pipeline | Speech-only WAVs used for transcription and playback |
+| `data/vad_audio/{recording_id}_chunks/` | processor | Temporary/derived VAD chunks for long-recording transcription |
 | `data/audio/` | legacy audio path | Kept for compatibility with earlier pipeline code |
 | `data/recordings/` | legacy/runtime path | Kept for compatibility |
 
 These files are intentionally ignored by Git.
+
+---
+
+## Developer tests
+
+Run the test suite with:
+
+```bash
+pytest
+```
+
+Current tests focus on local deterministic behavior and avoid real OpenRouter calls by monkeypatching AI clients where needed:
+
+- `tests/test_audio_append_pipeline.py`: verifies append/finalize behavior for raw, decoded, and VAD audio artifacts.
+- `tests/test_chapter_tests.py`: verifies generated question persistence, replacement, sampling, scoring, and wrong-answer explanations.
+
+When adding tests that touch the database, prefer temporary SQLite databases created under `tmp_path` and call `Base.metadata.create_all()` in the test fixture.
 
 ---
 
