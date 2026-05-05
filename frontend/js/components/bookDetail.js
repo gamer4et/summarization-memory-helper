@@ -6,7 +6,7 @@
  * a new empty recording session.
  *
  * Exported:
- *   renderBookDetail(container, { bookId, onBack, onNewRecording, onViewResults })
+ *   renderBookDetail(container, { bookId, onBack, onNewRecording, onContinueRecording, onViewResults })
  */
 
 import { api, ApiError, processRecording } from "../api.js";
@@ -20,13 +20,14 @@ import { renderMermaidDiagrams, renderSummaryWithTranscriptGraphs } from "../sum
  * @param {() => void} opts.onBack
  * @param {(book: object) => void} opts.onBookLoaded
  * @param {(book: object) => void} opts.onNewRecording
+ * @param {(book: object, recordingId: number) => void} opts.onContinueRecording
  * @param {(recordingId: number) => void} opts.onViewResults
  */
 export async function renderBookDetail(
   container,
   options
 ) {
-  const { bookId, onBack, onBookLoaded, onNewRecording, onViewResults } = options;
+  const { bookId, onBack, onBookLoaded, onNewRecording, onContinueRecording, onViewResults } = options;
 
   container.innerHTML = `
     <div class="loading-spinner">
@@ -63,6 +64,16 @@ export async function renderBookDetail(
   container.querySelectorAll("[data-action='view-results']").forEach((btn) => {
     btn.addEventListener("click", () => {
       onViewResults(Number(btn.dataset.recordingId));
+    });
+  });
+
+  container.querySelectorAll("[data-action='continue-recording']").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const recordingId = Number(btn.dataset.recordingId);
+      const recording = findRecording(book, recordingId);
+
+      if (!confirm(recordingContinueMessage(recording))) return;
+      onContinueRecording?.(book, recordingId);
     });
   });
 
@@ -284,6 +295,13 @@ function buildInlineChapterHTML(chapter) {
 }
 
 function buildRecordingActionHTML(recording) {
+  const continueAction = canContinueRecording(recording)
+    ? `
+      <button class="btn-warning btn-sm" data-action="continue-recording" data-recording-id="${recording.id}">
+        Continue Recording
+      </button>`
+    : "";
+
   const destructiveActions = `
     <button class="btn-ghost btn-sm" data-action="re-record" data-recording-id="${recording.id}">
       Re-record
@@ -303,6 +321,7 @@ function buildRecordingActionHTML(recording) {
           <button class="btn-ghost btn-sm" data-action="process-recording" data-recording-id="${recording.id}" data-default-label="Reprocess">
             Reprocess
           </button>
+          ${continueAction}
           ${destructiveActions}
         </div>
       </div>
@@ -315,7 +334,7 @@ function buildRecordingActionHTML(recording) {
         <button class="btn-primary" data-action="process-recording" data-recording-id="${recording.id}" data-default-label="Process (Russian)">
           Process (Russian)
         </button>
-        <div class="recording-secondary-actions">${destructiveActions}</div>
+        <div class="recording-secondary-actions">${continueAction}${destructiveActions}</div>
       </div>
     `;
   }
@@ -324,7 +343,7 @@ function buildRecordingActionHTML(recording) {
     return `
       <div class="recording-action-stack">
         <button class="btn-ghost" disabled>Processing…</button>
-        <div class="recording-secondary-actions">${destructiveActions}</div>
+        <div class="recording-secondary-actions">${continueAction}${destructiveActions}</div>
       </div>
     `;
   }
@@ -344,7 +363,7 @@ function buildRecordingActionHTML(recording) {
         <button class="btn-primary" data-action="process-recording" data-recording-id="${recording.id}" data-default-label="Retry Processing">
           Retry Processing
         </button>
-        <div class="recording-secondary-actions">${destructiveActions}</div>
+        <div class="recording-secondary-actions">${continueAction}${destructiveActions}</div>
       </div>
     `;
   }
@@ -452,6 +471,10 @@ function findRecording(book, recordingId) {
   return (book.recordings || []).find((recording) => recording.id === recordingId) || { id: recordingId };
 }
 
+function canContinueRecording(recording) {
+  return ["ready", "completed", "error"].includes(recording.status);
+}
+
 function recordingDeleteMessage(recording) {
   return [
     `Delete recording #${recording.id}?`,
@@ -466,6 +489,15 @@ function recordingReRecordMessage(recording) {
     "",
     "The current recording and its audio/chapters/transcriptions/summaries will be deleted.",
     "A new clean recording screen for this book will open immediately.",
+  ].join("\n");
+}
+
+function recordingContinueMessage(recording) {
+  return [
+    `Continue recording #${recording.id}?`,
+    "",
+    "New audio will be appended to the same recording.",
+    "After you stop, the full combined recording will be processed again and existing chapters, transcriptions, and summaries will be refreshed.",
   ].join("\n");
 }
 
@@ -504,15 +536,15 @@ async function hydrateRecordingDetails(recordings) {
 function statusDescription(status) {
   switch (status) {
     case "completed":
-      return "Chapters, transcription, summary, and recording audio are stored. Open them to view the existing results.";
+      return "Chapters, transcription, summary, and recording audio are stored. You can view results or continue this recording to append more audio and refresh results.";
     case "ready":
-      return "Audio is saved and ready for transcription/summarization. Processing will create chapter records.";
+      return "Audio is saved and ready for transcription/summarization. You can process it or continue recording to append more audio first.";
     case "processing":
       return "Transcription and summarization are currently running.";
     case "recording":
       return "This recording session was created but has not been finalized with uploaded audio.";
     case "error":
-      return "Processing or audio finalization failed. Retry processing if the saved audio is valid, or re-record from scratch.";
+      return "Processing or audio finalization failed. Retry processing if the saved audio is valid, continue recording to append more audio, or re-record from scratch.";
     default:
       return "Recording is stored with an unknown status.";
   }

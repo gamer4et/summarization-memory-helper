@@ -6,6 +6,7 @@
  *   #books               → Book list
  *   #book?book=<id>      → Selected book dashboard with existing results
  *   #record?book=<id>    → New recording panel for a book
+ *   #record?book=<id>&append=<recording_id> → Continue an existing recording
  *   #chapters?rec=<id>   → Chapter view for a completed recording
  *
  * Exported globals (used by components)
@@ -100,6 +101,11 @@ async function route() {
         state.book = book;
         setHash("record", { book: book.id });
       },
+      onContinueRecording(book, recordingId) {
+        state.book = book;
+        state.recordingId = recordingId;
+        setHash("record", { book: book.id, append: recordingId });
+      },
       onViewResults(recordingId) {
         state.recordingId = recordingId;
         setHash("chapters", { rec: recordingId });
@@ -111,6 +117,7 @@ async function route() {
   // ── Recording panel ───────────────────────────────────────────────────────
   if (path === "record") {
     const bookId = parseInt(params.book, 10);
+    const appendToRecordingId = parseInt(params.append, 10) || null;
     if (!bookId) { setHash("books"); return; }
 
     // If we don't have the book in state (e.g. hard link / refresh), fetch it
@@ -127,11 +134,12 @@ async function route() {
     setBreadcrumb(breadcrumb, [
       { label: "Books", onClick: () => setHash("books") },
       { label: state.book.title, onClick: () => setHash("book", { book: state.book.id }) },
-      { label: "New Recording" },
+      { label: appendToRecordingId ? "Continue Recording" : "New Recording" },
     ]);
 
     await renderRecordingPanel(main, {
       book: state.book,
+      appendToRecordingId,
       onBack() { setHash("book", { book: state.book.id }); },
       onViewChapters(recordingId) {
         state.recordingId = recordingId;

@@ -11,6 +11,7 @@ POST   /api/recordings/{id}/process — trigger transcription + summarization pi
 
 import logging
 import shutil
+from uuid import uuid4
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Response, UploadFile, status
@@ -21,7 +22,7 @@ from backend.core.config import settings
 from backend.core.exceptions import bad_request, not_found
 from backend.models.orm import Book, Recording
 from backend.schemas.api import RecordingCreate, RecordingDetailOut, RecordingOut, RecordingProcessRequest
-from backend.services.audio_pipeline import AudioPipelineError, finalize_raw_recording
+from backend.services.audio_pipeline import AudioPipelineError, append_raw_recording, finalize_raw_recording
 from backend.services.processor import process_recording, ProcessingError
 from backend.services.raw_audio_storage import save_raw_audio_upload
 
@@ -142,6 +143,70 @@ async def upload_recording_audio(
 
     logger.info(
         "Recording %d audio finalized: vad=%s duration=%.2fs segments=%d",
+        recording_id,
+        finalized.vad_path,
+        finalized.vad_duration_seconds,
+        finalized.speech_segments,
+    )
+    return recording
+
+
+@router.post(
+    "/{recording_id}/audio/append",
+    response_model=RecordingOut,
+    summary="Append browser audio to an existing recording and rerun offline VAD",
+)
+async def append_recording_audio(
+    recording_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> Recording:
+    """
+    Append a complete browser-recorded audio blob to an existing recording.
+
+    The endpoint rewrites the recording's decoded/VAD audio as one combined
+    chronological file and marks the recording ``ready``. The frontend then
+    immediately calls the existing processing endpoint to refresh chapters,
+    transcriptions, and summaries for the full combined recording.
+    """
+    recording = db.get(Recording, recording_id)
+    if recording is None:
+        raise not_found("Recording", recording_id)
+
+    if recording.status in {"recording", "processing"}:
+        raise bad_request(
+            f"Recording {recording_id} cannot be continued while status='{recording.status}'."
+        )
+
+    try:
+        raw_path = await save_raw_audio_upload(recording_id, file, suffix=f"-append-{uuid4().hex}")
+        finalized = await append_raw_recording(raw_path, recording_id)
+    except AudioPipelineError as exc:
+        recording.status = "error"
+        recording.processed_at = None
+        db.commit()
+        raise bad_request(str(exc)) from exc
+    except Exception as exc:
+        recording.status = "error"
+        recording.processed_at = None
+        db.commit()
+        logger.error(
+            "Unexpected audio append finalization error for recording %d: %s",
+            recording_id,
+            exc,
+            exc_info=True,
+        )
+        raise
+
+    recording.audio_file_path = str(finalized.vad_path)
+    recording.duration_seconds = finalized.vad_duration_seconds
+    recording.status = "ready"
+    recording.processed_at = None
+    db.commit()
+    db.refresh(recording)
+
+    logger.info(
+        "Recording %d audio appended: vad=%s duration=%.2fs segments=%d",
         recording_id,
         finalized.vad_path,
         finalized.vad_duration_seconds,

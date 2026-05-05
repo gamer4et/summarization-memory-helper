@@ -120,6 +120,20 @@ export function uploadRecordingAudio(recordingId, audioBlob) {
   return uploadRequest(`/api/recordings/${recordingId}/audio`, form);
 }
 
+/**
+ * Append one browser-recorded audio session to an existing recording.
+ *
+ * @param {number} recordingId
+ * @param {Blob} audioBlob
+ * @returns {Promise<object>} RecordingOut from the server
+ */
+export function appendRecordingAudio(recordingId, audioBlob) {
+  const form = new FormData();
+  const ext = audioBlob.type.includes("ogg") ? "ogg" : "webm";
+  form.append("file", audioBlob, `recording-${recordingId}-append.${ext}`);
+  return uploadRequest(`/api/recordings/${recordingId}/audio/append`, form);
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket helper
 // ---------------------------------------------------------------------------

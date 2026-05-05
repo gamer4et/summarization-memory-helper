@@ -2,18 +2,18 @@
  * recordingPanel.js — Recording view for a selected book.
  *
  * Flow:
- *   1. POST /api/recordings to create a DB row → get recording_id
+ *   1. POST /api/recordings to create a DB row → get recording_id, or reuse an existing recording id in continuation mode
  *   2. User selects a language from the dropdown (default: Russian)
  *   3. "Start Recording" → AudioRecorder.start(recording_id)
  *   4. Optional "Pause" excludes paused time from the final audio; "Resume" keeps appending to the same blob
- *   5. "Stop & Process" → AudioRecorder.stop() → upload one raw blob → offline VAD → POST process
+ *   5. "Stop & Process" → AudioRecorder.stop() → upload one raw blob or append blob → offline VAD → POST process
  *   6. Navigate to chapter view on success
  *
  * Exported:
- *   renderRecordingPanel(container, { book, onBack, onViewChapters })
+ *   renderRecordingPanel(container, { book, appendToRecordingId, onBack, onViewChapters })
  */
 
-import { api, ApiError, processRecording, uploadRecordingAudio } from "../api.js";
+import { api, ApiError, appendRecordingAudio, processRecording, uploadRecordingAudio } from "../api.js";
 import { AudioRecorder } from "../recorder.js";
 import { showToast } from "../app.js";
 
@@ -21,11 +21,13 @@ import { showToast } from "../app.js";
  * @param {HTMLElement} container
  * @param {object} opts
  * @param {object}   opts.book              — BookOut object
+ * @param {number|null} [opts.appendToRecordingId] — existing Recording id to append to
  * @param {() => void} opts.onBack          — navigate back to book list
  * @param {(recordingId: number) => void} opts.onViewChapters
  */
-export async function renderRecordingPanel(container, { book, onBack, onViewChapters }) {
-  container.innerHTML = buildPanelHTML(book);
+export async function renderRecordingPanel(container, { book, appendToRecordingId = null, onBack, onViewChapters }) {
+  const isAppendMode = Boolean(appendToRecordingId);
+  container.innerHTML = buildPanelHTML(book, { isAppendMode, appendToRecordingId });
 
   const stateEl      = container.querySelector("#rec-status-text");
   const iconEl       = container.querySelector("#rec-icon");
@@ -46,20 +48,22 @@ export async function renderRecordingPanel(container, { book, onBack, onViewChap
     selectedLanguage = languageSel.value;
   });
 
-  // Create a Recording row on the server right away
-  let recording;
-  try {
-    recording = await api.post("/api/recordings", { book_id: book.id });
-  } catch (err) {
-    container.innerHTML = `
-      <div class="card" style="color:var(--color-danger)">
-        <strong>Failed to create recording:</strong> ${escHtml(err.detail || err.message)}
-      </div>
-      <div class="view-actions">
-        <button class="btn-ghost" id="btn-back-err">← Back</button>
-      </div>`;
-    container.querySelector("#btn-back-err").addEventListener("click", onBack);
-    return;
+  // Create a new Recording row unless the panel was opened to continue one.
+  let recording = isAppendMode ? { id: appendToRecordingId, book_id: book.id } : null;
+  if (!recording) {
+    try {
+      recording = await api.post("/api/recordings", { book_id: book.id });
+    } catch (err) {
+      container.innerHTML = `
+        <div class="card" style="color:var(--color-danger)">
+          <strong>Failed to create recording:</strong> ${escHtml(err.detail || err.message)}
+        </div>
+        <div class="view-actions">
+          <button class="btn-ghost" id="btn-back-err">← Back</button>
+        </div>`;
+      container.querySelector("#btn-back-err").addEventListener("click", onBack);
+      return;
+    }
   }
 
   const recorder = new AudioRecorder();
@@ -95,7 +99,7 @@ export async function renderRecordingPanel(container, { book, onBack, onViewChap
         },
         onError(errMsg) {
           showToast(errMsg, "error");
-          setRecordingUI("idle", { iconEl, stateEl, startBtn, pauseBtn, stopBtn });
+          setRecordingUI("idle", { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode });
           setVolumeMeter(volMeterEl, volFillEl, 0, false);
           stopTick();
         },
@@ -108,12 +112,12 @@ export async function renderRecordingPanel(container, { book, onBack, onViewChap
         },
       });
 
-      setRecordingUI("recording", { iconEl, stateEl, startBtn, pauseBtn, stopBtn });
+      setRecordingUI("recording", { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode });
       setVolumeMeter(volMeterEl, volFillEl, 0, true);
       startTick();
     } catch (err) {
       showToast(err.message, "error");
-      setRecordingUI("idle", { iconEl, stateEl, startBtn, pauseBtn, stopBtn });
+      setRecordingUI("idle", { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode });
       setVolumeMeter(volMeterEl, volFillEl, 0, false);
       startBtn.disabled = false;
       languageSel.disabled = false;
@@ -127,49 +131,63 @@ export async function renderRecordingPanel(container, { book, onBack, onViewChap
     if (recorder.isPaused) {
       const resumed = recorder.resume();
       if (!resumed) return;
-      setRecordingUI("recording", { iconEl, stateEl, startBtn, pauseBtn, stopBtn });
+      setRecordingUI("recording", { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode });
       setVolumeMeter(volMeterEl, volFillEl, 0, true);
       return;
     }
 
     const paused = recorder.pause();
     if (!paused) return;
-    setRecordingUI("paused", { iconEl, stateEl, startBtn, pauseBtn, stopBtn });
+    setRecordingUI("paused", { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode });
     setVolumeMeter(volMeterEl, volFillEl, 0, false);
   });
 
   // ── Stop button ───────────────────────────────────────────────────────────
   stopBtn.addEventListener("click", async () => {
-    setRecordingUI("stopping", { iconEl, stateEl, startBtn, pauseBtn, stopBtn });
+    setRecordingUI("stopping", { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode });
     setVolumeMeter(volMeterEl, volFillEl, 0, false);
 
     try {
       const audioBlob = await recorder.stop();
       stopTick();
-      setRecordingUI("finalizing", { iconEl, stateEl, startBtn, pauseBtn, stopBtn });
+      setRecordingUI("finalizing", { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode });
       setVolumeMeter(volMeterEl, volFillEl, 0, false);
 
       if (!audioBlob || audioBlob.size === 0) {
         throw new Error("Browser produced an empty audio blob. Please record again.");
       }
 
-      setRecordingUI("finalizing", { iconEl, stateEl, startBtn, pauseBtn, stopBtn });
-      stateEl.textContent = "Uploading complete raw recording…";
-      setProcessingStatus(processEl, "processing", "⬆️ Uploading raw audio and running offline VAD…");
-      await uploadRecordingAudio(recording.id, audioBlob);
+      setRecordingUI("finalizing", { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode });
+      stateEl.textContent = isAppendMode
+        ? "Uploading additional raw audio…"
+        : "Uploading complete raw recording…";
+      setProcessingStatus(
+        processEl,
+        "processing",
+        isAppendMode
+          ? "⬆️ Appending audio and rebuilding VAD-filtered recording…"
+          : "⬆️ Uploading raw audio and running offline VAD…"
+      );
+      if (isAppendMode) {
+        await appendRecordingAudio(recording.id, audioBlob);
+      } else {
+        await uploadRecordingAudio(recording.id, audioBlob);
+      }
 
-      stateEl.textContent = "VAD-filtered audio is ready.";
+      stateEl.textContent = isAppendMode
+        ? "Combined VAD-filtered audio is ready."
+        : "VAD-filtered audio is ready.";
 
       // Trigger the transcription + summarisation pipeline with the selected language
-      setRecordingUI("processing", { iconEl, stateEl, startBtn, pauseBtn, stopBtn });
+      setRecordingUI("processing", { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode });
       await runProcessing(recording.id, selectedLanguage, processEl, onViewChapters);
-      setRecordingUI("idle", { iconEl, stateEl, startBtn, pauseBtn, stopBtn });
+      setRecordingUI("idle", { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode });
       languageSel.disabled = false;
     } catch (err) {
       const detail = err instanceof ApiError ? err.detail : err.message;
       setProcessingStatus(processEl, "error", `❌ Recording finalization failed: ${escHtml(detail)}`);
       showToast("Recording finalization failed — see panel for details.", "error");
-      setRecordingUI("idle", { iconEl, stateEl, startBtn, pauseBtn, stopBtn });
+      setRecordingUI("idle", { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode });
       setVolumeMeter(volMeterEl, volFillEl, 0, false);
       startBtn.disabled = false;
       languageSel.disabled = false;
@@ -234,7 +252,7 @@ function setVolumeMeter(containerEl, fillEl, level, active) {
   fillEl.style.backgroundColor = color;
 }
 
-function setRecordingUI(mode, { iconEl, stateEl, startBtn, pauseBtn, stopBtn }) {
+function setRecordingUI(mode, { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode = false }) {
   const isRecording = mode === "recording";
   const isPaused    = mode === "paused";
   const isStopping  = mode === "stopping";
@@ -255,7 +273,9 @@ function setRecordingUI(mode, { iconEl, stateEl, startBtn, pauseBtn, stopBtn }) 
   } else if (isProcessing) {
     stateEl.textContent = "Transcribing and summarizing audio…";
   } else {
-    stateEl.innerHTML = "Press <strong>Start Recording</strong> to begin.";
+    stateEl.innerHTML = isAppendMode
+      ? "Press <strong>Start Recording</strong> to append audio to the existing recording."
+      : "Press <strong>Start Recording</strong> to begin.";
   }
 
   startBtn.disabled = isBusy;
@@ -283,18 +303,21 @@ function setProcessingStatus(el, type, text = "") {
 // HTML template
 // ---------------------------------------------------------------------------
 
-function buildPanelHTML(book) {
+function buildPanelHTML(book, { isAppendMode = false, appendToRecordingId = null } = {}) {
   return `
     <div class="recording-panel">
       <div class="recording-panel-header">
-        <h2>${escHtml(book.title)}</h2>
+        <h2>${isAppendMode ? "Continue Recording" : escHtml(book.title)}</h2>
         ${book.author ? `<div class="author">by ${escHtml(book.author)}</div>` : ""}
+        ${isAppendMode ? `<div class="book-detail-meta">Appending to recording #${escHtml(appendToRecordingId)}</div>` : ""}
       </div>
 
       <div class="recorder-card" id="recorder-card">
         <div id="rec-icon" class="rec-icon">🎙</div>
         <div id="rec-status-text" class="rec-status-text">
-          Press <strong>Start Recording</strong> to begin.
+          ${isAppendMode
+            ? `Press <strong>Start Recording</strong> to append audio to the existing recording.`
+            : `Press <strong>Start Recording</strong> to begin.`}
         </div>
 
         <div class="rec-language">
@@ -317,7 +340,7 @@ function buildPanelHTML(book) {
         </div>
 
         <div class="rec-controls">
-          <button class="btn-primary btn-lg" id="btn-start">▶ Start Recording</button>
+          <button class="btn-primary btn-lg" id="btn-start">▶ ${isAppendMode ? "Start Continuation" : "Start Recording"}</button>
           <button class="btn-warning btn-lg" id="btn-pause" disabled>⏸ Pause</button>
           <button class="btn-danger btn-lg" id="btn-stop" disabled>⏹ Stop &amp; Process</button>
         </div>
@@ -335,11 +358,13 @@ function buildPanelHTML(book) {
       <div id="processing-status" class="processing-status" hidden></div>
 
       <div class="view-actions">
-        <button class="btn-ghost" id="btn-back">← Back to Books</button>
+        <button class="btn-ghost" id="btn-back">← Back to Book</button>
       </div>
 
       <div class="card mt-3" style="font-size:.88rem;color:var(--color-text-muted)">
-        <strong>Tip:</strong> Select the spoken language before recording.
+        <strong>Tip:</strong> ${isAppendMode
+          ? "After stopping, the new audio will be appended and the full recording will be processed again, replacing previous results."
+          : "Select the spoken language before recording."}
         While recording, say phrases like
         <em>"new chapter"</em>, <em>"next chapter"</em>,
         <em>"chapter three"</em>, or <em>"глава один"</em>

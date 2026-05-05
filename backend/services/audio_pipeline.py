@@ -70,6 +70,86 @@ async def finalize_raw_recording(raw_path: Path, recording_id: int) -> Finalized
             f"Decoded audio is empty for recording {recording_id}. Raw file: {raw_path.name}"
         )
 
+    return _finalize_decoded_pcm(
+        raw_path=raw_path,
+        decoded_path=decoded_path,
+        vad_path=vad_path,
+        recording_id=recording_id,
+        decoded_pcm=decoded_pcm,
+    )
+
+
+async def append_raw_recording(raw_path: Path, recording_id: int) -> FinalizedAudio:
+    """
+    Append a newly uploaded browser recording to an existing recording.
+
+    The existing decoded WAV remains the canonical chronological audio source.
+    The new browser blob is decoded to a temporary WAV, its PCM is appended to
+    the existing decoded PCM, then VAD output and transcription chunks are
+    regenerated from the combined audio.
+    """
+    if not raw_path.exists() or raw_path.stat().st_size == 0:
+        raise AudioPipelineError(
+            f"Append raw audio file is empty or missing: {raw_path}"
+        )
+
+    decoded_path = Path(settings.audio.decoded_storage_dir) / f"{recording_id}.wav"
+    vad_path = Path(settings.audio.vad_storage_dir) / f"{recording_id}.wav"
+    decoded_path.parent.mkdir(parents=True, exist_ok=True)
+    vad_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_source = decoded_path if decoded_path.exists() else vad_path
+    if not existing_source.exists() or existing_source.stat().st_size == 0:
+        raise AudioPipelineError(
+            f"Recording {recording_id} has no existing decoded/VAD audio to append to."
+        )
+
+    append_decoded_path = decoded_path.with_name(
+        f"{decoded_path.stem}.append-{raw_path.stem}{decoded_path.suffix}"
+    )
+
+    await _decode_to_wav(raw_path, append_decoded_path)
+
+    try:
+        existing_pcm = _read_wav_pcm(existing_source)
+        append_pcm = _read_wav_pcm(append_decoded_path)
+        if not append_pcm:
+            raise AudioPipelineError(
+                f"Decoded append audio is empty for recording {recording_id}. Raw file: {raw_path.name}"
+            )
+
+        combined_pcm = existing_pcm + append_pcm
+        if not combined_pcm:
+            raise AudioPipelineError(
+                f"Combined decoded audio is empty for recording {recording_id}."
+            )
+
+        _write_wav(decoded_path, combined_pcm)
+    finally:
+        if append_decoded_path.exists():
+            try:
+                append_decoded_path.unlink()
+            except OSError as exc:
+                logger.warning("Could not remove temporary decoded append file %s: %s", append_decoded_path, exc)
+
+    return _finalize_decoded_pcm(
+        raw_path=raw_path,
+        decoded_path=decoded_path,
+        vad_path=vad_path,
+        recording_id=recording_id,
+        decoded_pcm=combined_pcm,
+    )
+
+
+def _finalize_decoded_pcm(
+    *,
+    raw_path: Path,
+    decoded_path: Path,
+    vad_path: Path,
+    recording_id: int,
+    decoded_pcm: bytes,
+) -> FinalizedAudio:
+    """Run VAD over decoded PCM and rewrite the recording WAV/chunks."""
     speech_segments = _run_offline_vad(decoded_pcm, recording_id)
     if not speech_segments:
         # Ensure stale output from previous attempts cannot be transcribed.

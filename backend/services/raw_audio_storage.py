@@ -46,13 +46,18 @@ def extension_for_mime(content_type: str | None, filename: str | None = None) ->
     return ".webm"
 
 
-async def save_raw_audio_upload(recording_id: int, upload: UploadFile) -> Path:
+async def save_raw_audio_upload(
+    recording_id: int,
+    upload: UploadFile,
+    *,
+    suffix: str = "",
+) -> Path:
     """Persist a complete browser recording blob and return its path."""
     raw_dir = Path(settings.audio.raw_storage_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     ext = extension_for_mime(upload.content_type, upload.filename)
-    path = raw_dir / f"{recording_id}{ext}"
+    path = raw_dir / f"{recording_id}{suffix}{ext}"
 
     total_bytes = 0
     with path.open("wb") as out:
