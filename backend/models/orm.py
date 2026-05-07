@@ -154,6 +154,11 @@ class Summary(Base):
         Integer, ForeignKey("chapters.id", ondelete="CASCADE"), nullable=False
     )
     summary_text = Column(Text, nullable=False)
+    graphs_markdown = Column(Text, nullable=True)
+    definitions_markdown = Column(Text, nullable=True)
+    dense_summary_markdown = Column(Text, nullable=True)
+    key_facts_markdown = Column(Text, nullable=True)
+    triples_markdown = Column(Text, nullable=True)
     model_used = Column(String(256), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 

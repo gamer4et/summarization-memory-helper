@@ -5,7 +5,7 @@
  *   renderChapterView(container, { recordingId, onBack, onBookLoaded, onNewRecording })
  */
 
-import { api } from "../api.js";
+import { api, updateRecordingChapter, updateRecordingChapterOrder } from "../api.js";
 import { showToast } from "../app.js";
 import { renderMermaidDiagrams, renderSummaryWithTranscriptGraphs } from "../summaryRenderer.js";
 
@@ -17,7 +17,7 @@ import { renderMermaidDiagrams, renderSummaryWithTranscriptGraphs } from "../sum
  * @param {(book: object) => void} opts.onBookLoaded — update router state/breadcrumb with recording's book
  * @param {(book: object) => void} opts.onNewRecording — start another recording for same book
  */
-export async function renderChapterView(container, { recordingId, onBack, onBookLoaded, onNewRecording }) {
+export async function renderChapterView(container, { recordingId, onBack, onBookLoaded, onNewRecording, openChapterId = null }) {
   container.innerHTML = `
     <div class="loading-spinner">
       <div class="spinner"></div>
@@ -49,15 +49,18 @@ export async function renderChapterView(container, { recordingId, onBack, onBook
 
   // Wire chapter accordion items
   container.querySelectorAll(".chapter-summary-row").forEach((row) => {
-    row.addEventListener("click", () => {
+    row.addEventListener("click", (event) => {
+      if (event.target.closest("button, input, textarea, label, a")) return;
       const item = row.closest(".chapter-item");
       item.classList.toggle("is-open");
     });
   });
 
-  // Open the first chapter by default
-  const firstItem = container.querySelector(".chapter-item");
-  if (firstItem) firstItem.classList.add("is-open");
+  // Open the requested chapter, or the first chapter by default
+  const initialOpenItem = openChapterId
+    ? container.querySelector(`.chapter-item[data-chapter-id='${openChapterId}']`)
+    : container.querySelector(".chapter-item");
+  if (initialOpenItem) initialOpenItem.classList.add("is-open");
 
   // Buttons
   container.querySelector("#btn-back")?.addEventListener("click", () => onBack(recording.book_id));
@@ -79,6 +82,90 @@ export async function renderChapterView(container, { recordingId, onBack, onBook
   container.querySelector("#btn-export")?.addEventListener("click", () => {
     exportToText(recording);
   });
+
+  container.querySelectorAll("[data-action='save-chapter']").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const chapterId = Number(btn.dataset.chapterId);
+      const item = btn.closest(".chapter-item");
+      const transcription = item.querySelector("[data-field='transcription']")?.value ?? "";
+      const summary = item.querySelector("[data-field='summary']")?.value ?? "";
+      const payload = {
+        title: item.querySelector("[data-field='title']")?.value ?? "",
+      };
+      if (transcription.trim()) payload.transcription = transcription;
+      if (summary.trim()) payload.summary = summary;
+
+      btn.disabled = true;
+      const originalLabel = btn.textContent;
+      btn.textContent = "Saving…";
+      try {
+        recording = await updateRecordingChapter(recordingId, chapterId, payload);
+        showToast("Chapter changes saved.", "success");
+        await rerenderChapterView(container, recording, book, { onBack, onBookLoaded, onNewRecording }, chapterId);
+      } catch (err) {
+        showToast("Could not save chapter: " + (err.detail || err.message), "error", 6000);
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-action='reset-chapter-form']").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const item = btn.closest(".chapter-item");
+      const chapterId = Number(btn.dataset.chapterId);
+      const chapter = (recording.chapters || []).find((ch) => ch.id === chapterId);
+      if (!chapter || !item) return;
+      item.querySelector("[data-field='title']").value = chapter.title || "";
+      item.querySelector("[data-field='transcription']").value = chapter.transcription?.raw_text || "";
+      item.querySelector("[data-field='summary']").value = chapter.summary?.summary_text || "";
+      item.classList.remove("is-editing");
+      showToast("Chapter form reset.", "info");
+    });
+  });
+
+  container.querySelectorAll("[data-action='toggle-chapter-edit']").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const item = btn.closest(".chapter-item");
+      if (!item) return;
+      const isEditing = item.classList.toggle("is-editing");
+      item.classList.add("is-open");
+      btn.textContent = isEditing ? "Hide Editor" : "Edit";
+      btn.setAttribute("aria-expanded", String(isEditing));
+    });
+  });
+
+  container.querySelectorAll("[data-action='move-chapter']").forEach((btn) => {
+    btn.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const chapterId = Number(btn.dataset.chapterId);
+      const direction = btn.dataset.direction;
+      const nextOrder = getReorderedChapterIds(recording.chapters || [], chapterId, direction);
+      if (!nextOrder) return;
+
+      btn.disabled = true;
+      try {
+        recording = await updateRecordingChapterOrder(recordingId, nextOrder);
+        showToast("Chapter order saved.", "success");
+        await rerenderChapterView(container, recording, book, { onBack, onBookLoaded, onNewRecording }, chapterId);
+      } catch (err) {
+        showToast("Could not reorder chapters: " + (err.detail || err.message), "error", 6000);
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
+async function rerenderChapterView(container, recording, book, options, openChapterId = null) {
+  const freshOptions = {
+    ...options,
+    openChapterId,
+    onBookLoaded: (loadedBook) => {
+      options.onBookLoaded?.(loadedBook || book);
+    },
+  };
+  await renderChapterView(container, { ...freshOptions, recordingId: recording.id });
 }
 
 // ---------------------------------------------------------------------------
@@ -142,18 +229,20 @@ function buildChaptersHTML(chapters) {
     `;
   }
 
-  const items = chapters.map((ch) => buildChapterItemHTML(ch)).join("\n");
+  const items = chapters.map((ch, index) => buildChapterItemHTML(ch, index, chapters.length)).join("\n");
   return `<div class="chapters-list">${items}</div>`;
 }
 
-function buildChapterItemHTML(chapter) {
+function buildChapterItemHTML(chapter, index, totalChapters) {
+  const transcription = chapter.transcription?.raw_text || "";
+  const summary = chapter.summary?.summary_text || "";
   const transcriptionHTML = chapter.transcription
     ? `<details class="chapter-section transcription-details">
          <summary>
            <span>📝 Transcription</span>
            <span class="details-hint">show raw transcript</span>
          </summary>
-         <pre>${escHtml(chapter.transcription.raw_text)}</pre>
+         <pre>${escHtml(transcription)}</pre>
        </details>`
     : `<div class="chapter-section text-muted text-sm">No transcription available.</div>`;
 
@@ -171,9 +260,9 @@ function buildChapterItemHTML(chapter) {
          </div>
          <div class="summary-content-shell">
            <div class="summary-markdown">${renderSummaryWithTranscriptGraphs(
-             chapter.summary.summary_text,
-             chapter.transcription?.raw_text || ""
-           )}</div>
+              summary,
+              transcription
+            )}</div>
          </div>
          <div class="summary-meta-row">
            <span class="summary-model-chip">🤖 Model: ${escHtml(chapter.summary.model_used)}</span>
@@ -182,9 +271,11 @@ function buildChapterItemHTML(chapter) {
     : `<div class="chapter-section text-muted text-sm">No summary available.</div>`;
 
   const titleText = escHtml(deriveChapterTitle(chapter));
+  const canMoveUp = index > 0;
+  const canMoveDown = index < totalChapters - 1;
 
   return `
-    <div class="chapter-item">
+    <div class="chapter-item" data-chapter-id="${chapter.id}">
       <div class="chapter-summary-row" role="button" tabindex="0"
            aria-expanded="false" aria-controls="ch-body-${chapter.id}">
         <div class="chapter-num-badge">${chapter.chapter_number}</div>
@@ -192,14 +283,63 @@ function buildChapterItemHTML(chapter) {
           <span class="chunk-badge">Chapter ${chapter.chapter_number}</span>
           ${titleText}
         </div>
+        <button class="btn-ghost btn-sm chapter-edit-toggle" data-action="toggle-chapter-edit" data-chapter-id="${chapter.id}" aria-expanded="false">Edit</button>
+        <div class="chapter-sort-controls" aria-label="Sort chapter">
+          <button class="btn-ghost btn-sm" data-action="move-chapter" data-direction="up" data-chapter-id="${chapter.id}" ${canMoveUp ? "" : "disabled"}>↑</button>
+          <button class="btn-ghost btn-sm" data-action="move-chapter" data-direction="down" data-chapter-id="${chapter.id}" ${canMoveDown ? "" : "disabled"}>↓</button>
+        </div>
         <span class="chapter-chevron">▼</span>
       </div>
       <div class="chapter-body" id="ch-body-${chapter.id}">
+        ${buildChapterEditFormHTML(chapter, transcription, summary)}
         ${summaryHTML}
         ${transcriptionHTML}
       </div>
     </div>
   `;
+}
+
+function buildChapterEditFormHTML(chapter, transcription, summary) {
+  return `
+    <section class="chapter-section chapter-edit-section" aria-label="Manual chapter editing">
+      <div class="chapter-edit-header">
+        <div>
+          <h4>Manual Edit</h4>
+          <p>Use this only when you need to correct the saved title, transcription, or summary.</p>
+        </div>
+      </div>
+      <div class="chapter-edit-grid">
+        <label class="chapter-edit-field chapter-edit-title-field">
+          <span>Title</span>
+          <input data-field="title" type="text" maxlength="512" value="${escHtml(chapter.title || "")}" placeholder="Chapter title">
+        </label>
+        <label class="chapter-edit-field">
+          <span>Transcription</span>
+          <textarea data-field="transcription" rows="8" placeholder="Raw transcription text">${escHtml(transcription)}</textarea>
+        </label>
+        <label class="chapter-edit-field">
+          <span>Summary</span>
+          <textarea data-field="summary" rows="10" placeholder="Markdown summary text">${escHtml(summary)}</textarea>
+        </label>
+      </div>
+      <div class="chapter-edit-actions">
+        <button class="btn-primary btn-sm" data-action="save-chapter" data-chapter-id="${chapter.id}">Save Chapter</button>
+        <button class="btn-ghost btn-sm" data-action="reset-chapter-form" data-chapter-id="${chapter.id}">Cancel Changes</button>
+      </div>
+    </section>
+  `;
+}
+
+function getReorderedChapterIds(chapters, chapterId, direction) {
+  const ids = chapters.map((chapter) => chapter.id);
+  const currentIndex = ids.indexOf(chapterId);
+  if (currentIndex === -1) return null;
+
+  const nextIndex = direction === "up" ? currentIndex - 1 : currentIndex + 1;
+  if (nextIndex < 0 || nextIndex >= ids.length) return null;
+
+  [ids[currentIndex], ids[nextIndex]] = [ids[nextIndex], ids[currentIndex]];
+  return ids;
 }
 
 // ---------------------------------------------------------------------------

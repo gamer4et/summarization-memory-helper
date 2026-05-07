@@ -13,9 +13,10 @@ Three functions are exposed:
     chapter boundaries globally. Raw audio/VAD chunks are intentionally not
     treated as chapters.
 
-``summarize_text(text)``
-    Sends a chapter text to the OpenRouter chat/completions endpoint.
-    Returns the LLM-generated summary string.
+``summarize_chapter_sections(text)``
+    Sends a chapter text to five focused OpenRouter chat/completions requests.
+    Each request returns one strict Markdown section; the sections are assembled
+    into one Markdown summary for the existing UI.
 
 ``generate_chapter_tests(text, chapter_title, target_count)``
     Sends a chapter transcription to a text LLM and returns stored multiple-choice
@@ -26,6 +27,7 @@ Both functions raise :class:`httpx.HTTPStatusError` on 4xx/5xx responses and
 """
 
 import base64
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -287,6 +289,139 @@ CHAPTER_TESTS_RESPONSE_FORMAT: dict = {
             "additionalProperties": False,
         },
     },
+}
+
+
+SUMMARY_SECTION_ORDER = (
+    "graphs",
+    "definitions",
+    "dense_summary",
+    "key_facts",
+    "triples",
+)
+
+
+SUMMARY_SECTION_HEADINGS: dict[str, str] = {
+    "graphs": "## Графы",
+    "definitions": "## Определения, таблицы и тезисы",
+    "dense_summary": "## Плотная сводка",
+    "key_facts": "## Ключевые факты",
+    "triples": "## Триплеты",
+}
+
+
+SUMMARY_SECTION_EMPTY_MESSAGES: dict[str, str] = {
+    "graphs": "— Явных графовых структур в главе нет или модель вернула пустой ответ.",
+    "definitions": "— Определения, таблицы и тезисы не извлечены: модель вернула пустой ответ.",
+    "dense_summary": "— Плотная сводка недоступна: модель вернула пустой ответ.",
+    "key_facts": "— Ключевые факты не извлечены: модель вернула пустой ответ.",
+    "triples": "— Триплеты не извлечены: модель вернула пустой ответ.",
+}
+
+
+SUMMARY_SECTION_SYSTEM_PROMPTS: dict[str, str] = {
+    "graphs": """You extract every meaningful graph-like structure from a chapter transcript.
+Return only Markdown in the requested output language. Do not return JSON.
+
+Rules:
+1. Use only the transcript. Do not invent entities, links, processes, or hierarchy.
+2. Extract all explicit relationship graphs and all structures defined in the chapter: causal maps, hierarchies, classifications, processes, dependencies, contrasts, entity relationships, frameworks, and table-like structures that are clearer as graphs.
+3. If the chapter contains multiple independent graphs, output multiple separate Mermaid code blocks.
+4. Each Mermaid block must use `flowchart LR` only.
+5. Node IDs must be Latin letters/digits/underscores without spaces. Display names must be quoted in square brackets, for example `A["Name"]`.
+6. Edge labels must be concise and factual.
+7. If there are no graph-worthy relationships, return the heading and `— Явных графовых структур в главе нет.`
+
+Strict format:
+## Графы
+
+### <graph title>
+```mermaid
+flowchart LR
+  A["..."] -->|...| B["..."]
+```
+
+Repeat graph subsections as needed. Output no text outside this section.""",
+    "definitions": """You extract definitions, tables, and theses from a chapter transcript.
+Return only Markdown in the requested output language. Do not return JSON.
+
+Rules:
+1. Use only the transcript. Do not invent or import external knowledge.
+2. Extract absolutely all definitions, explicit terms, distinctions, rules, claims, theses, exceptions, caveats, classifications, and table-like structures present in the chapter.
+3. Treat the transcript as imperfect speech: ignore obvious filler and ASR glitches, but never change meaning.
+4. Include short source anchors as verbatim quotes where possible.
+5. If a subsection has no items, keep the subsection and write `—` plus a short reason.
+
+Strict format:
+## Определения, таблицы и тезисы
+
+### Определения
+- **<term>** — <definition>. *Источник:* «<short quote>»
+
+### Таблицы и структуры
+| Название | Элементы/колонки | Смысл | Источник |
+|---|---|---|---|
+| ... | ... | ... | «...» |
+
+### Тезисы
+- <thesis>. *Источник:* «<short quote>»
+
+### Исключения и оговорки
+- <exception/caveat>. *Источник:* «<short quote>»
+
+Output no text outside this section.""",
+    "dense_summary": """You write a very dense chapter summary.
+Return only Markdown in the requested output language. Do not return JSON.
+
+Rules:
+1. Use only the transcript. Do not invent facts.
+2. Silently ignore speech filler and obvious ASR glitches without changing meaning.
+3. Internally perform chain-of-density compression: start broad, add missing important entities, compress wording, and keep all central concepts.
+4. The final paragraph must be compact but information-rich.
+
+Strict format:
+## Плотная сводка
+
+<one dense paragraph, usually 120–220 words, depending on chapter complexity>
+
+**Ключевые сущности:** <10–25 comma-separated entities/concepts>
+
+Output no text outside this section.""",
+    "key_facts": """You extract key facts from a chapter transcript.
+Return only Markdown in the requested output language. Do not return JSON.
+
+Rules:
+1. Use only the transcript. Do not invent facts.
+2. Extract all key atomic facts, not just a small sample. A fact must be self-contained and understandable without surrounding context.
+3. Prefer conceptual, causal, definitional, practical, and argumentative facts over minor wording trivia.
+4. Include a short verbatim source anchor for every fact where possible.
+5. If there are no factual claims, return the heading and `— Ключевые факты не обнаружены.`
+
+Strict format:
+## Ключевые факты
+
+1. <atomic fact>. *Источник:* «<short quote>»
+2. ...
+
+Output no text outside this section.""",
+    "triples": """You extract knowledge graph triples from a chapter transcript.
+Return only Markdown in the requested output language. Do not return JSON.
+
+Rules:
+1. Use only the transcript. Do not invent subjects, relations, or objects.
+2. Extract all meaningful subject–relation–object triples: definitions, causality, hierarchy, membership, opposition, constraints, examples, properties, consequences, and process steps.
+3. Normalize entity names consistently.
+4. Include source anchors as short verbatim quotes where possible.
+5. If there are no triples, return the heading and an empty table with one row containing `—`.
+
+Strict format:
+## Триплеты
+
+| Субъект | Отношение | Объект | Источник |
+|---|---|---|---|
+| <subject> | <relation> | <object> | «<short quote>» |
+
+Output no text outside this section.""",
 }
 
 
@@ -640,6 +775,141 @@ async def summarize_text(text: str) -> str:
 
     logger.info("Summarization complete: %d chars", len(summary))
     return summary
+
+
+def assemble_summary_markdown(sections: dict[str, str]) -> str:
+    """Assemble focused Markdown sections into one summary for the UI."""
+    parts: list[str] = []
+    for section_key in SUMMARY_SECTION_ORDER:
+        section_text = str(sections.get(section_key) or "").strip()
+        if section_text:
+            parts.append(section_text)
+    return "\n\n".join(parts).strip()
+
+
+def _empty_summary_section_markdown(section_key: str) -> str:
+    """Return a valid Markdown section when a provider returns no content."""
+    heading = SUMMARY_SECTION_HEADINGS[section_key]
+    message = SUMMARY_SECTION_EMPTY_MESSAGES[section_key]
+    if section_key == "triples":
+        return (
+            f"{heading}\n\n"
+            "| Субъект | Отношение | Объект | Источник |\n"
+            "|---|---|---|---|\n"
+            f"| — | — | — | {message} |"
+        )
+    return f"{heading}\n\n{message}"
+
+
+async def _summarize_chapter_section(text: str, section_key: str) -> str:
+    """Generate one strict Markdown summary section for a chapter."""
+    transcript = str(text or "").strip()
+    if not transcript:
+        raise ValueError("Cannot summarize an empty chapter transcription.")
+    if section_key not in SUMMARY_SECTION_SYSTEM_PROMPTS:
+        raise ValueError(f"Unknown summary section key: {section_key}")
+
+    s = settings.openrouter.summarization
+    heading = SUMMARY_SECTION_HEADINGS[section_key]
+    logger.info(
+        "Generating summary section '%s': %d chars using model=%s",
+        section_key,
+        len(transcript),
+        s.model,
+    )
+    user_prompt = (
+        f"Язык вывода: `{s.language}`\n"
+        f"Обязательный заголовок секции: `{heading}`\n\n"
+        "Транскрипт главы для анализа:\n"
+        "```\n"
+        f"{transcript}\n"
+        "```\n\n"
+        "Верни только требуемую Markdown-секцию. Не возвращай JSON. "
+        "Не добавляй вступление, заключение или комментарии вне секции."
+    )
+
+    payload: dict = {
+        "model": s.model,
+        "messages": [
+            {"role": "system", "content": SUMMARY_SECTION_SYSTEM_PROMPTS[section_key]},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": s.max_tokens,
+        "temperature": s.temperature,
+    }
+
+    headers = {**_auth_headers(), "Content-Type": "application/json"}
+
+    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        response = await client.post(
+            f"{_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+        )
+
+    _log_response(response, f"summary section {section_key}")
+    response.raise_for_status()
+
+    body = response.json()
+    try:
+        raw_content = body["choices"][0]["message"].get("content")
+    except (KeyError, IndexError, TypeError) as exc:
+        raise OpenRouterError(
+            f"Summary section '{section_key}' response has unexpected structure: {body!r}"
+        ) from exc
+
+    section_markdown = str(raw_content or "").strip()
+    if not section_markdown:
+        logger.warning(
+            "Summary section '%s' response content is empty/null; using fallback Markdown section. Body: %r",
+            section_key,
+            body,
+        )
+        section_markdown = _empty_summary_section_markdown(section_key)
+
+
+    logger.info(
+        "Summary section '%s' complete: %d chars",
+        section_key,
+        len(section_markdown),
+    )
+    return section_markdown
+
+
+@retry(
+    retry=retry_if_exception(_is_retriable_error),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=5, max=30),
+    reraise=True,
+)
+async def summarize_chapter_sections(text: str) -> dict:
+    """Generate all chapter summary sections as strict Markdown.
+
+    The five calls are launched in parallel because they read the same chapter
+    transcript and have no dependencies on each other. Any failed section fails
+    the whole attempt, keeping the existing processing error semantics.
+    """
+    transcript = str(text or "").strip()
+    if not transcript:
+        raise ValueError("Cannot summarize an empty chapter transcription.")
+
+    section_values = await asyncio.gather(
+        *(
+            _summarize_chapter_section(transcript, section_key)
+            for section_key in SUMMARY_SECTION_ORDER
+        )
+    )
+    sections = dict(zip(SUMMARY_SECTION_ORDER, section_values, strict=True))
+    summary_text = assemble_summary_markdown(sections)
+    logger.info(
+        "Multi-section summarization complete: %d section(s), %d assembled chars",
+        len(sections),
+        len(summary_text),
+    )
+    return {
+        "summary_text": summary_text,
+        "sections": sections,
+    }
 
 
 @retry(

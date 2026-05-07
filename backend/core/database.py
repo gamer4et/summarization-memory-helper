@@ -76,14 +76,38 @@ def create_all_tables() -> None:
 def _ensure_lightweight_schema_updates() -> None:
     """Apply simple additive schema updates for deployments without migrations."""
     inspector = inspect(engine)
-    if "chapter_test_options" not in inspector.get_table_names():
+    table_names = inspector.get_table_names()
+
+    if "chapter_test_options" in table_names:
+        option_columns = {column["name"] for column in inspector.get_columns("chapter_test_options")}
+        if "wrong_explanation" not in option_columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE chapter_test_options ADD COLUMN wrong_explanation TEXT"))
+            logger.info("Added missing chapter_test_options.wrong_explanation column.")
+
+    if "summaries" not in table_names:
         return
 
-    option_columns = {column["name"] for column in inspector.get_columns("chapter_test_options")}
-    if "wrong_explanation" not in option_columns:
+    summary_columns = {column["name"] for column in inspector.get_columns("summaries")}
+    missing_summary_columns = [
+        column_name
+        for column_name in [
+            "graphs_markdown",
+            "definitions_markdown",
+            "dense_summary_markdown",
+            "key_facts_markdown",
+            "triples_markdown",
+        ]
+        if column_name not in summary_columns
+    ]
+    if missing_summary_columns:
         with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE chapter_test_options ADD COLUMN wrong_explanation TEXT"))
-        logger.info("Added missing chapter_test_options.wrong_explanation column.")
+            for column_name in missing_summary_columns:
+                conn.execute(text(f"ALTER TABLE summaries ADD COLUMN {column_name} TEXT"))
+        logger.info(
+            "Added missing summaries markdown section column(s): %s",
+            ", ".join(missing_summary_columns),
+        )
 
 
 # ---------------------------------------------------------------------------

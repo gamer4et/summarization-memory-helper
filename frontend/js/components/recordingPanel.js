@@ -38,6 +38,7 @@ export async function renderRecordingPanel(container, { book, appendToRecordingI
   const elapsedEl    = container.querySelector("#elapsed-time");
   const chunksEl     = container.querySelector("#chunks-count");
   const languageSel  = container.querySelector("#language-select");
+  const micControls  = Array.from(container.querySelectorAll("[data-mic-setting]"));
   const volMeterEl   = container.querySelector("#volume-meter");
   const volFillEl    = container.querySelector("#volume-fill");
 
@@ -87,11 +88,13 @@ export async function renderRecordingPanel(container, { book, appendToRecordingI
   startBtn.addEventListener("click", async () => {
     startBtn.disabled = true;
     languageSel.disabled = true;   // lock language once recording starts
+    setMicControlsDisabled(micControls, true);
     stateEl.textContent = "Requesting microphone access…";
     setProcessingStatus(processEl, "");
 
     try {
       await recorder.start(recording.id, {
+        audioConstraints: readMicConstraints(container),
         onStatus(msg) {
           const n = msg.chunks || (parseInt(chunksEl.dataset.count || "0") + 1);
           chunksEl.dataset.count = n;
@@ -121,6 +124,7 @@ export async function renderRecordingPanel(container, { book, appendToRecordingI
       setVolumeMeter(volMeterEl, volFillEl, 0, false);
       startBtn.disabled = false;
       languageSel.disabled = false;
+      setMicControlsDisabled(micControls, false);
     }
   });
 
@@ -183,6 +187,7 @@ export async function renderRecordingPanel(container, { book, appendToRecordingI
       await runProcessing(recording.id, selectedLanguage, processEl, onViewChapters);
       setRecordingUI("idle", { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode });
       languageSel.disabled = false;
+      setMicControlsDisabled(micControls, false);
     } catch (err) {
       const detail = err instanceof ApiError ? err.detail : err.message;
       setProcessingStatus(processEl, "error", `❌ Recording finalization failed: ${escHtml(detail)}`);
@@ -191,6 +196,7 @@ export async function renderRecordingPanel(container, { book, appendToRecordingI
       setVolumeMeter(volMeterEl, volFillEl, 0, false);
       startBtn.disabled = false;
       languageSel.disabled = false;
+      setMicControlsDisabled(micControls, false);
     }
   });
 
@@ -250,6 +256,26 @@ function setVolumeMeter(containerEl, fillEl, level, active) {
   else if (level < 75)  color = "var(--color-warning)";
   else                  color = "var(--color-danger)";
   fillEl.style.backgroundColor = color;
+}
+
+function readMicConstraints(container) {
+  const channelCount = Number(container.querySelector("#mic-channel-count")?.value || 2);
+  const sampleRate = Number(container.querySelector("#mic-sample-rate")?.value || 48000);
+  const echoCancellation = Boolean(container.querySelector("#mic-echo-cancellation")?.checked);
+  const noiseSuppression = Boolean(container.querySelector("#mic-noise-suppression")?.checked);
+
+  return {
+    channelCount,
+    sampleRate,
+    echoCancellation,
+    noiseSuppression,
+  };
+}
+
+function setMicControlsDisabled(controls, disabled) {
+  controls.forEach((control) => {
+    control.disabled = disabled;
+  });
 }
 
 function setRecordingUI(mode, { iconEl, stateEl, startBtn, pauseBtn, stopBtn, isAppendMode = false }) {
@@ -331,6 +357,36 @@ function buildPanelHTML(book, { isAppendMode = false, appendToRecordingId = null
             <option value="es">Spanish (es)</option>
           </select>
         </div>
+
+        <fieldset class="mic-settings" aria-label="Browser microphone constraints">
+          <legend>🎚 Browser audio flags</legend>
+          <label class="mic-setting">
+            <span>Channels</span>
+            <select id="mic-channel-count" data-mic-setting>
+              <option value="1">1 / mono</option>
+              <option value="2" selected>2 / stereo</option>
+            </select>
+          </label>
+          <label class="mic-setting">
+            <span>Sample rate hint</span>
+            <select id="mic-sample-rate" data-mic-setting>
+              <option value="16000">16 kHz</option>
+              <option value="44100">44.1 kHz</option>
+              <option value="48000" selected>48 kHz</option>
+            </select>
+          </label>
+          <label class="mic-setting mic-setting-checkbox">
+            <input id="mic-echo-cancellation" type="checkbox" data-mic-setting>
+            <span>echoCancellation</span>
+          </label>
+          <label class="mic-setting mic-setting-checkbox">
+            <input id="mic-noise-suppression" type="checkbox" data-mic-setting>
+            <span>noiseSuppression</span>
+          </label>
+          <div class="mic-settings-note">
+            Defaults favor clean USB microphones: 48 kHz stereo, browser echo/noise processing off.
+          </div>
+        </fieldset>
 
         <div class="volume-meter" id="volume-meter" aria-label="Microphone volume">
           <span class="volume-meter-label">🎤</span>

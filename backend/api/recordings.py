@@ -20,8 +20,15 @@ from sqlalchemy.orm import Session
 from backend.core.database import get_db
 from backend.core.config import settings
 from backend.core.exceptions import bad_request, not_found
-from backend.models.orm import Book, Recording
-from backend.schemas.api import RecordingCreate, RecordingDetailOut, RecordingOut, RecordingProcessRequest
+from backend.models.orm import Book, Chapter, Recording, Summary, Transcription
+from backend.schemas.api import (
+    ChapterOrderRequest,
+    ChapterUpdateRequest,
+    RecordingCreate,
+    RecordingDetailOut,
+    RecordingOut,
+    RecordingProcessRequest,
+)
 from backend.services.audio_pipeline import AudioPipelineError, append_raw_recording, finalize_raw_recording
 from backend.services.processor import process_recording, ProcessingError
 from backend.services.raw_audio_storage import save_raw_audio_upload
@@ -29,6 +36,37 @@ from backend.services.raw_audio_storage import save_raw_audio_upload
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/recordings", tags=["recordings"])
+
+
+def build_recording_detail(recording: Recording) -> RecordingDetailOut:
+    """Build a recording detail response with a browser-playable audio URL."""
+    detail = RecordingDetailOut.model_validate(recording)
+    detail.audio_url = f"/media/audio/{recording.id}.wav"
+    return detail
+
+
+def require_editable_recording(db: Session, recording_id: int) -> Recording:
+    """Return a completed recording that supports manual chapter edits."""
+    recording = db.get(Recording, recording_id)
+    if recording is None:
+        raise not_found("Recording", recording_id)
+    if recording.status != "completed":
+        raise bad_request(
+            f"Recording {recording_id} chapters can be edited only after processing is completed."
+        )
+    return recording
+
+
+def require_recording_chapter(db: Session, recording_id: int, chapter_id: int) -> Chapter:
+    """Return a chapter if it belongs to the selected recording."""
+    chapter = (
+        db.query(Chapter)
+        .filter(Chapter.recording_id == recording_id, Chapter.id == chapter_id)
+        .first()
+    )
+    if chapter is None:
+        raise not_found("Chapter", chapter_id)
+    return chapter
 
 
 # ---------------------------------------------------------------------------
@@ -230,11 +268,87 @@ def get_recording(recording_id: int, db: Session = Depends(get_db)) -> Recording
     if recording is None:
         raise not_found("Recording", recording_id)
 
-    detail = RecordingDetailOut.model_validate(recording)
-    # Set the browser-playable URL for the VAD-filtered WAV file.
-    # The file is always named {recording_id}.wav under data/vad_audio/.
-    detail.audio_url = f"/media/audio/{recording.id}.wav"
-    return detail
+    return build_recording_detail(recording)
+
+
+@router.patch(
+    "/{recording_id}/chapters/order",
+    response_model=RecordingDetailOut,
+    summary="Persist manual chapter ordering for a completed recording",
+)
+def update_chapter_order(
+    recording_id: int,
+    payload: ChapterOrderRequest,
+    db: Session = Depends(get_db),
+) -> RecordingDetailOut:
+    """Rewrite chapter_number values according to the provided chapter id order."""
+    recording = require_editable_recording(db, recording_id)
+    chapters = list(recording.chapters or [])
+    existing_ids = {chapter.id for chapter in chapters}
+    requested_ids = payload.chapter_ids
+
+    if len(requested_ids) != len(set(requested_ids)):
+        raise bad_request("Chapter order contains duplicate chapter ids.")
+    if set(requested_ids) != existing_ids:
+        raise bad_request("Chapter order must contain every chapter id for this recording exactly once.")
+
+    chapter_by_id = {chapter.id: chapter for chapter in chapters}
+    for index, requested_chapter_id in enumerate(requested_ids, start=1):
+        chapter_by_id[requested_chapter_id].chapter_number = index
+
+    db.commit()
+    db.refresh(recording)
+    db.expire(recording, ["chapters"])
+    logger.info("Manually reordered %d chapter(s) for recording id=%d", len(chapters), recording_id)
+    return build_recording_detail(recording)
+
+
+@router.patch(
+    "/{recording_id}/chapters/{chapter_id}",
+    response_model=RecordingDetailOut,
+    summary="Manually update a completed recording chapter",
+)
+def update_chapter(
+    recording_id: int,
+    chapter_id: int,
+    payload: ChapterUpdateRequest,
+    db: Session = Depends(get_db),
+) -> RecordingDetailOut:
+    """Update chapter title, transcription text, and/or summary text."""
+    recording = require_editable_recording(db, recording_id)
+    chapter = require_recording_chapter(db, recording_id, chapter_id)
+
+    if payload.title is not None:
+        chapter.title = payload.title.strip() or None
+
+    if payload.transcription is not None:
+        text = payload.transcription.strip()
+        if not text:
+            raise bad_request("Chapter transcription cannot be empty.")
+        if chapter.transcription is None:
+            chapter.transcription = Transcription(raw_text=text)
+        else:
+            chapter.transcription.raw_text = text
+
+    if payload.summary is not None:
+        text = payload.summary.strip()
+        if not text:
+            raise bad_request("Chapter summary cannot be empty.")
+        if chapter.summary is None:
+            chapter.summary = Summary(
+                summary_text=text,
+                dense_summary_markdown=text,
+                model_used="manual",
+            )
+        else:
+            chapter.summary.summary_text = text
+            chapter.summary.dense_summary_markdown = text
+
+    db.commit()
+    db.refresh(recording)
+    db.expire(recording, ["chapters"])
+    logger.info("Manually updated chapter id=%d for recording id=%d", chapter_id, recording_id)
+    return build_recording_detail(recording)
 
 
 # ---------------------------------------------------------------------------

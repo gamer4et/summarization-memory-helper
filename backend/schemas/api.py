@@ -5,7 +5,7 @@ Pydantic request and response schemas for all API endpoints.
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +68,20 @@ class RecordingProcessRequest(BaseModel):
     language: str = "ru"
 
 
+class ChapterUpdateRequest(BaseModel):
+    """Manually update chapter metadata and generated/stored text fields."""
+
+    title: Optional[str] = Field(None, max_length=512)
+    transcription: Optional[str] = None
+    summary: Optional[str] = None
+
+
+class ChapterOrderRequest(BaseModel):
+    """Persist a complete manual chapter ordering for one recording."""
+
+    chapter_ids: List[int] = Field(..., min_length=1)
+
+
 # ---------------------------------------------------------------------------
 # Chapters
 # ---------------------------------------------------------------------------
@@ -103,8 +117,24 @@ class SummaryOut(_ORMBase):
     id: int
     chapter_id: int
     summary_text: str
+    graphs_markdown: Optional[str] = None
+    definitions_markdown: Optional[str] = None
+    dense_summary_markdown: Optional[str] = None
+    key_facts_markdown: Optional[str] = None
+    triples_markdown: Optional[str] = None
     model_used: str
     created_at: datetime
+
+    @computed_field
+    @property
+    def summary_sections(self) -> dict[str, str]:
+        return {
+            "graphs": self.graphs_markdown or "",
+            "definitions": self.definitions_markdown or "",
+            "dense_summary": self.dense_summary_markdown or "",
+            "key_facts": self.key_facts_markdown or "",
+            "triples": self.triples_markdown or "",
+        }
 
 
 # ---------------------------------------------------------------------------

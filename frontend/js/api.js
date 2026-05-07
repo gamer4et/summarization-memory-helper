@@ -106,6 +106,29 @@ export function processRecording(recordingId, language = "ru") {
   return request("POST", `/api/recordings/${recordingId}/process`, { language });
 }
 
+/**
+ * Manually update one chapter's editable fields.
+ *
+ * @param {number} recordingId
+ * @param {number} chapterId
+ * @param {{title?: string|null, transcription?: string, summary?: string}} payload
+ * @returns {Promise<object>} RecordingDetailOut from the server
+ */
+export function updateRecordingChapter(recordingId, chapterId, payload) {
+  return request("PATCH", `/api/recordings/${recordingId}/chapters/${chapterId}`, payload);
+}
+
+/**
+ * Persist the manual order of chapters for one recording.
+ *
+ * @param {number} recordingId
+ * @param {number[]} chapterIds
+ * @returns {Promise<object>} RecordingDetailOut from the server
+ */
+export function updateRecordingChapterOrder(recordingId, chapterIds) {
+  return request("PATCH", `/api/recordings/${recordingId}/chapters/order`, { chapter_ids: chapterIds });
+}
+
 /** @param {number} bookId */
 export function getBookTestAvailability(bookId) {
   return request("GET", `/api/books/${bookId}/tests/availability`);

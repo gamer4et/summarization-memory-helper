@@ -30,7 +30,7 @@ from backend.models.orm import Chapter, Recording, Summary, Transcription
 from backend.services.chapter_parser import parse_llm_chapters
 from backend.services.openrouter_client import (
     analyze_transcription_chapters,
-    summarize_text,
+    summarize_chapter_sections,
     transcribe_audio,
 )
 
@@ -220,10 +220,25 @@ async def process_recording(
         )
 
         # ------------------------------------------------------------------ #
-        # Step 3 – Persist chapters, transcriptions, and summaries
+        # Step 3 – Generate summaries before opening a DB write transaction
+        # ------------------------------------------------------------------ #
+        # SQLite allows only one writer at a time. Do not hold an uncommitted
+        # INSERT/flush transaction while waiting for slow external LLM calls.
+        for idx, pc in enumerate(parsed_chapters, start=1):
+            logger.info(
+                "Generating summary for chapter %d/%d before DB persistence",
+                idx,
+                len(parsed_chapters),
+            )
+            pc["summary_result"] = await summarize_chapter_sections(pc["transcription"])
+
+        # ------------------------------------------------------------------ #
+        # Step 4 – Persist chapters, transcriptions, and summaries
         # ------------------------------------------------------------------ #
         for idx, pc in enumerate(parsed_chapters, start=1):
             chapter_number = pc["chapter_number"] if pc["chapter_number"] else idx
+            summary_result = pc["summary_result"]
+            summary_sections = summary_result["sections"]
 
             chapter = Chapter(
                 recording_id=recording.id,
@@ -243,12 +258,15 @@ async def process_recording(
                 )
             )
 
-            # Summarize the chapter text.
-            summary_text: str = await summarize_text(pc["transcription"])
             db.add(
                 Summary(
                     chapter_id=chapter.id,
-                    summary_text=summary_text,
+                    summary_text=str(summary_result["summary_text"]),
+                    graphs_markdown=summary_sections.get("graphs") or None,
+                    definitions_markdown=summary_sections.get("definitions") or None,
+                    dense_summary_markdown=summary_sections.get("dense_summary") or None,
+                    key_facts_markdown=summary_sections.get("key_facts") or None,
+                    triples_markdown=summary_sections.get("triples") or None,
                     model_used=settings.openrouter.summarization.model,
                 )
             )
@@ -261,7 +279,7 @@ async def process_recording(
             )
 
         # ------------------------------------------------------------------ #
-        # Step 4 – Mark completed
+        # Step 5 – Mark completed
         # ------------------------------------------------------------------ #
         recording.status = "completed"
         recording.processed_at = datetime.utcnow()

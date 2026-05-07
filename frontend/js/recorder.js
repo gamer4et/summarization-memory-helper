@@ -21,6 +21,13 @@ const MIME_CANDIDATES = [
   "audio/ogg",
 ];
 
+const DEFAULT_AUDIO_CONSTRAINTS = {
+  channelCount: 2,
+  sampleRate: 48000,   // hint only; browser may ignore
+  echoCancellation: false,
+  noiseSuppression: false,
+};
+
 function pickMimeType() {
   for (const mime of MIME_CANDIDATES) {
     if (MediaRecorder.isTypeSupported(mime)) return mime;
@@ -92,8 +99,9 @@ export class AudioRecorder {
    * @param {(err: Error|string) => void} [callbacks.onError]
    * @param {(msg: object) => void}      [callbacks.onStopped]
    * @param {(level: number) => void}    [callbacks.onVolume]  — 0..100 RMS level, ~30 fps
+   * @param {MediaTrackConstraints}      [callbacks.audioConstraints] — browser mic constraints
    */
-  async start(recordingId, { onStatus = null, onError = null, onStopped = null, onVolume = null } = {}) {
+  async start(recordingId, { onStatus = null, onError = null, onStopped = null, onVolume = null, audioConstraints = null } = {}) {
     if (this._isRecording) throw new Error("Already recording.");
 
     this._onStatus  = onStatus;
@@ -109,15 +117,20 @@ export class AudioRecorder {
 
     // 1. Request microphone
     try {
+      const constraints = {
+        ...DEFAULT_AUDIO_CONSTRAINTS,
+        ...(audioConstraints || {}),
+      };
       this._stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,   // hint only; browser may ignore
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
+        audio: constraints,
         video: false,
       });
+
+      const [audioTrack] = this._stream.getAudioTracks();
+      if (audioTrack && typeof audioTrack.getSettings === "function") {
+        console.info("[AudioRecorder] Requested mic constraints:", constraints);
+        console.info("[AudioRecorder] Actual mic settings:", audioTrack.getSettings());
+      }
     } catch (err) {
       const msg = err.name === "NotAllowedError"
         ? "Microphone access denied. Please allow microphone access and try again."

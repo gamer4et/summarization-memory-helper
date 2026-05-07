@@ -654,6 +654,67 @@ input:focus, textarea:focus {
   min-height: 1.5em;
 }
 
+.mic-settings {
+  margin: 1rem auto 1.25rem;
+  padding: 1rem;
+  max-width: 680px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+  text-align: left;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: rgba(247, 249, 255, 0.74);
+}
+
+.mic-settings legend {
+  padding: 0 0.35rem;
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.mic-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.mic-setting select {
+  width: 100%;
+  padding: 0.48rem 0.65rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-weight: 600;
+}
+
+.mic-setting-checkbox {
+  min-height: 40px;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--color-text);
+}
+
+.mic-setting-checkbox input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--color-primary);
+}
+
+.mic-settings-note {
+  grid-column: 1 / -1;
+  color: var(--color-text-muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
 .rec-controls {
   display: flex;
   gap: 0.75rem;
@@ -831,6 +892,25 @@ input:focus, textarea:focus {
   transition: transform 0.2s;
 }
 
+.chapter-edit-toggle {
+  flex: 0 0 auto;
+  color: var(--color-primary);
+  font-weight: 700;
+}
+
+.chapter-sort-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 0 0 auto;
+}
+
+.chapter-sort-controls .btn-sm {
+  min-width: 2.1rem;
+  padding-inline: 0.5rem;
+  font-weight: 700;
+}
+
 .chapter-item.is-open .chapter-chevron {
   transform: rotate(180deg);
 }
@@ -855,6 +935,68 @@ input:focus, textarea:focus {
 }
 
 .chapter-section:last-child { border-bottom: none; }
+
+.chapter-edit-section {
+  display: none;
+  background: linear-gradient(180deg, #fff, #f8f9ff);
+}
+
+.chapter-item.is-editing .chapter-edit-section {
+  display: block;
+}
+
+.chapter-edit-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.chapter-edit-header p {
+  color: var(--color-text-muted);
+  font-size: 0.88rem;
+  margin-top: 0.2rem;
+}
+
+.chapter-edit-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(280px, 1.2fr) minmax(320px, 1.4fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.chapter-edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.chapter-edit-field span {
+  color: var(--color-text-muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.chapter-edit-field textarea {
+  min-height: 13rem;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+.chapter-edit-title-field input {
+  font-weight: 600;
+}
+
+.chapter-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: 1rem;
+}
 
 .transcription-details {
   background: #fbfcff;
@@ -1821,6 +1963,9 @@ body.has-mermaid-modal {
   .main-content { max-width: 100%; }
   .chapter-view { width: 100%; margin-left: 0; transform: none; }
   .main-content { padding: 1.25rem 1rem; }
+  .chapter-edit-grid { grid-template-columns: 1fr; }
+  .chapter-summary-row { align-items: flex-start; flex-wrap: wrap; }
+  .chapter-sort-controls { order: 3; width: 100%; justify-content: flex-end; }
   .book-grid { grid-template-columns: 1fr; }
   .rec-controls { flex-direction: column; align-items: stretch; }
   .live-stats { gap: 1rem; }
