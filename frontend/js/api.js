@@ -107,6 +107,16 @@ export function processRecording(recordingId, language = "ru") {
 }
 
 /**
+ * Fetch lightweight processing progress for a recording.
+ *
+ * @param {number} recordingId
+ * @returns {Promise<object>} RecordingProgressOut from the server
+ */
+export function getRecordingProgress(recordingId) {
+  return request("GET", `/api/recordings/${recordingId}/progress`);
+}
+
+/**
  * Manually update one chapter's editable fields.
  *
  * @param {number} recordingId

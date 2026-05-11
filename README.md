@@ -244,8 +244,19 @@ audio:
 
 openrouter:
   transcription:
-    model: "google/gemini-3.1-flash-lite-preview"
+    model: "google/gemini-3.1-pro-preview"
+    provider_order:
+      - "google-vertex/global"
+    provider_allow_fallbacks: false
     default_language: "ru"
+    stream: true
+    max_tokens: 512000
+    temperature: 0.1
+    top_p: 1.0
+    thinking_effort: "medium"
+    response_schema_name: "audio_transcription"
+    schema_descriptions:
+      full_transcription: "Complete transcription of all speech in this audio fragment."
   summarization:
     model: "google/gemini-3.1-pro-preview"
     max_tokens: 512000
@@ -253,7 +264,47 @@ openrouter:
     default_modes: "dense_summary, key_facts, triples, quotes, categories"
     language: "auto"
     density_iterations: 3
+    chapter_analysis_schema_name: "chapter_analysis"
+    chapter_tests_schema_name: "chapter_tests"
 ```
+
+OpenRouter calls use the official OpenAI Python client configured with the
+OpenRouter-compatible base URL. Transcription sends stored VAD-filtered WAV
+chunks (`data/vad_audio/:id_chunks/*.wav`) to the multimodal Gemini LLM through
+chat/completions and asks it to return structured JSON with `full_transcription`.
+The assembled VAD WAV (`data/vad_audio/:id.wav`) remains the browser-playable
+canonical speech file and is used as a fallback only when no chunk directory is
+present.
+
+Transcription defaults to `stream: true` so each VAD chunk receives streaming/SSE
+progress chunks instead of waiting for one idle non-streaming response, which
+reduces gateway timeout and provider `502` risks. Chunked transcription also
+keeps each base64 JSON request below typical provider gateway payload limits.
+
+When Gemini/OpenRouter thinking models stream reasoning metadata but no final
+content, the backend preserves `reasoning_details`/`reasoning` exactly on an
+assistant history message and sends one bounded "continue" turn asking for only
+the final structured JSON. This is the OpenRouter/Gemini thought-signature
+continuation workaround for reasoning-only streams.
+
+`openrouter.transcription.provider_order` is optional OpenRouter provider
+routing for transcription requests. Set it to a specific provider order together
+with `openrouter.transcription.provider_allow_fallbacks: false` to force audio
+transcription through only that route and prevent fallbacks to other providers.
+
+`openrouter.transcription.thinking_effort` is optional. When set, it is sent to
+OpenRouter as `reasoning: { effort: "..." }` for audio-capable reasoning models.
+Supported values are `xhigh`, `high`, `medium`, `low`, `minimal`, and `none`.
+Use `null` or an empty string to omit the `reasoning` parameter entirely.
+
+`openrouter.transcription.max_tokens`, `temperature`, and `top_p` are sent with
+each transcription request when set. Use `null` or an empty string to omit any of
+these optional generation parameters.
+
+Structured JSON responses are defined with Pydantic models in the backend and
+sent to OpenRouter as JSON Schema. The `*_schema_name` and `*_schema_descriptions`
+settings let you override schema names and field descriptions without editing
+code.
 
 Use `.env` for secrets and local overrides. At minimum, set:
 
@@ -480,8 +531,9 @@ sequenceDiagram
 
     UI->>API: POST /api/recordings/{id}/process
     API->>DB: status=processing
-    API->>OR: Transcribe VAD WAV
-    OR-->>API: Transcript / chapter text
+    API->>OR: Transcribe VAD chunk WAVs sequentially
+    OR-->>API: Chunk transcripts
+    API->>API: Concatenate chunk transcripts and analyze chapters
     API->>OR: Summarize each chapter
     OR-->>API: Summary text
     API->>DB: INSERT chapters/transcriptions/summaries and set status completed
@@ -529,7 +581,7 @@ flowchart LR
     D --> E[data/decoded_audio/:id.wav]
     E --> F[WebRTC VAD]
     F --> G[data/vad_audio/:id.wav]
-    G --> H[Optional VAD chunks for long recordings]
+    F --> H[Transcription VAD chunks]
     H --> I[OpenRouter transcription]
     I --> J[Chapter parser]
     J --> K[OpenRouter summarization]
@@ -777,7 +829,7 @@ The application writes runtime state under `data/`:
 | `data/raw_audio/` | raw upload service | Original browser recordings |
 | `data/decoded_audio/` | audio pipeline | Full decoded WAV diagnostics |
 | `data/vad_audio/` | audio pipeline | Speech-only WAVs used for transcription and playback |
-| `data/vad_audio/{recording_id}_chunks/` | processor | Temporary/derived VAD chunks for long-recording transcription |
+| `data/vad_audio/{recording_id}_chunks/` | audio pipeline | Diagnostic VAD chunks for debugging only; not used for transcription |
 | `data/audio/` | legacy audio path | Kept for compatibility with earlier pipeline code |
 | `data/recordings/` | legacy/runtime path | Kept for compatibility |
 

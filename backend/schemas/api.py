@@ -53,6 +53,60 @@ class RecordingCreate(BaseModel):
     book_id: int
 
 
+class RecordingProgressOut(BaseModel):
+    """Persisted processing progress for a recording."""
+
+    recording_id: int
+    status: str
+    stage: str = "idle"
+    message: str = ""
+    percent: int = Field(0, ge=0, le=100)
+    transcription_chunks_completed: int = 0
+    transcription_chunks_total: int = 0
+    summary_chapters_completed: int = 0
+    summary_chapters_total: int = 0
+    summary_sections_completed: int = 0
+    summary_sections_total: int = 0
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    @computed_field
+    @property
+    def transcription_percent(self) -> int:
+        if self.transcription_chunks_total <= 0:
+            return 0
+        return max(
+            0,
+            min(100, round(self.transcription_chunks_completed / self.transcription_chunks_total * 100)),
+        )
+
+    @computed_field
+    @property
+    def summary_percent(self) -> int:
+        if self.summary_chapters_total <= 0:
+            return 0
+        return max(
+            0,
+            min(100, round(self.summary_chapters_completed / self.summary_chapters_total * 100)),
+        )
+
+    @computed_field
+    @property
+    def summary_section_percent(self) -> int:
+        if self.summary_sections_total <= 0:
+            return 0
+        return max(
+            0,
+            min(100, round(self.summary_sections_completed / self.summary_sections_total * 100)),
+        )
+
+    @computed_field
+    @property
+    def is_active(self) -> bool:
+        return self.status == "processing" and self.stage not in {"completed", "error"}
+
+
 class RecordingOut(_ORMBase):
     id: int
     book_id: int
@@ -60,6 +114,38 @@ class RecordingOut(_ORMBase):
     duration_seconds: Optional[float]
     created_at: datetime
     processed_at: Optional[datetime]
+    progress_stage: Optional[str] = Field(None, exclude=True)
+    progress_message: Optional[str] = Field(None, exclude=True)
+    progress_percent: Optional[int] = Field(None, exclude=True)
+    transcription_chunks_completed: Optional[int] = Field(None, exclude=True)
+    transcription_chunks_total: Optional[int] = Field(None, exclude=True)
+    summary_chapters_completed: Optional[int] = Field(None, exclude=True)
+    summary_chapters_total: Optional[int] = Field(None, exclude=True)
+    summary_sections_completed: Optional[int] = Field(None, exclude=True)
+    summary_sections_total: Optional[int] = Field(None, exclude=True)
+    progress_error: Optional[str] = Field(None, exclude=True)
+    progress_started_at: Optional[datetime] = Field(None, exclude=True)
+    progress_updated_at: Optional[datetime] = Field(None, exclude=True)
+
+    @computed_field
+    @property
+    def progress(self) -> RecordingProgressOut:
+        return RecordingProgressOut(
+            recording_id=self.id,
+            status=self.status,
+            stage=self.progress_stage or "idle",
+            message=self.progress_message or "",
+            percent=self.progress_percent or 0,
+            transcription_chunks_completed=self.transcription_chunks_completed or 0,
+            transcription_chunks_total=self.transcription_chunks_total or 0,
+            summary_chapters_completed=self.summary_chapters_completed or 0,
+            summary_chapters_total=self.summary_chapters_total or 0,
+            summary_sections_completed=self.summary_sections_completed or 0,
+            summary_sections_total=self.summary_sections_total or 0,
+            error_message=self.progress_error,
+            started_at=self.progress_started_at,
+            updated_at=self.progress_updated_at,
+        )
 
 
 class RecordingProcessRequest(BaseModel):
@@ -119,6 +205,7 @@ class SummaryOut(_ORMBase):
     summary_text: str
     graphs_markdown: Optional[str] = None
     definitions_markdown: Optional[str] = None
+    tables_markdown: Optional[str] = None
     dense_summary_markdown: Optional[str] = None
     key_facts_markdown: Optional[str] = None
     triples_markdown: Optional[str] = None
@@ -131,6 +218,7 @@ class SummaryOut(_ORMBase):
         return {
             "graphs": self.graphs_markdown or "",
             "definitions": self.definitions_markdown or "",
+            "tables": self.tables_markdown or "",
             "dense_summary": self.dense_summary_markdown or "",
             "key_facts": self.key_facts_markdown or "",
             "triples": self.triples_markdown or "",

@@ -78,6 +78,36 @@ def _ensure_lightweight_schema_updates() -> None:
     inspector = inspect(engine)
     table_names = inspector.get_table_names()
 
+    if "recordings" in table_names:
+        recording_columns = {column["name"] for column in inspector.get_columns("recordings")}
+        missing_recording_columns = [
+            ("progress_stage", "VARCHAR(64)"),
+            ("progress_message", "TEXT"),
+            ("progress_percent", "INTEGER"),
+            ("transcription_chunks_completed", "INTEGER"),
+            ("transcription_chunks_total", "INTEGER"),
+            ("summary_chapters_completed", "INTEGER"),
+            ("summary_chapters_total", "INTEGER"),
+            ("summary_sections_completed", "INTEGER"),
+            ("summary_sections_total", "INTEGER"),
+            ("progress_error", "TEXT"),
+            ("progress_started_at", "DATETIME"),
+            ("progress_updated_at", "DATETIME"),
+        ]
+        missing_recording_columns = [
+            (column_name, column_type)
+            for column_name, column_type in missing_recording_columns
+            if column_name not in recording_columns
+        ]
+        if missing_recording_columns:
+            with engine.begin() as conn:
+                for column_name, column_type in missing_recording_columns:
+                    conn.execute(text(f"ALTER TABLE recordings ADD COLUMN {column_name} {column_type}"))
+            logger.info(
+                "Added missing recordings progress column(s): %s",
+                ", ".join(column_name for column_name, _ in missing_recording_columns),
+            )
+
     if "chapter_test_options" in table_names:
         option_columns = {column["name"] for column in inspector.get_columns("chapter_test_options")}
         if "wrong_explanation" not in option_columns:
@@ -86,14 +116,19 @@ def _ensure_lightweight_schema_updates() -> None:
             logger.info("Added missing chapter_test_options.wrong_explanation column.")
 
     if "summaries" not in table_names:
+        summary_columns = set()
+    else:
+        summary_columns = {column["name"] for column in inspector.get_columns("summaries")}
+
+    if "summaries" not in table_names:
         return
 
-    summary_columns = {column["name"] for column in inspector.get_columns("summaries")}
     missing_summary_columns = [
         column_name
         for column_name in [
             "graphs_markdown",
             "definitions_markdown",
+            "tables_markdown",
             "dense_summary_markdown",
             "key_facts_markdown",
             "triples_markdown",

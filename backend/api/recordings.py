@@ -27,10 +27,12 @@ from backend.schemas.api import (
     RecordingCreate,
     RecordingDetailOut,
     RecordingOut,
+    RecordingProgressOut,
     RecordingProcessRequest,
 )
 from backend.services.audio_pipeline import AudioPipelineError, append_raw_recording, finalize_raw_recording
 from backend.services.processor import process_recording, ProcessingError
+from backend.services.processing_progress import reset_recording_progress, save_recording_progress
 from backend.services.raw_audio_storage import save_raw_audio_upload
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,11 @@ def build_recording_detail(recording: Recording) -> RecordingDetailOut:
     detail = RecordingDetailOut.model_validate(recording)
     detail.audio_url = f"/media/audio/{recording.id}.wav"
     return detail
+
+
+def build_recording_progress(recording: Recording) -> RecordingProgressOut:
+    """Build a lightweight processing progress response."""
+    return RecordingOut.model_validate(recording).progress
 
 
 def require_editable_recording(db: Session, recording_id: int) -> Recording:
@@ -160,10 +167,28 @@ async def upload_recording_audio(
         finalized = await finalize_raw_recording(raw_path, recording_id)
     except AudioPipelineError as exc:
         recording.status = "error"
+        save_recording_progress(
+            db,
+            recording,
+            stage="error",
+            message="Audio finalization failed.",
+            error_message=str(exc),
+            percent=0,
+            commit=False,
+        )
         db.commit()
         raise bad_request(str(exc)) from exc
     except Exception as exc:
         recording.status = "error"
+        save_recording_progress(
+            db,
+            recording,
+            stage="error",
+            message="Unexpected audio finalization error.",
+            error_message=str(exc),
+            percent=0,
+            commit=False,
+        )
         db.commit()
         logger.error(
             "Unexpected audio finalization error for recording %d: %s",
@@ -176,6 +201,12 @@ async def upload_recording_audio(
     recording.audio_file_path = str(finalized.vad_path)
     recording.duration_seconds = finalized.vad_duration_seconds
     recording.status = "ready"
+    reset_recording_progress(
+        recording,
+        stage="ready",
+        message="Audio is finalized and ready for transcription.",
+        percent=0,
+    )
     db.commit()
     db.refresh(recording)
 
@@ -222,11 +253,29 @@ async def append_recording_audio(
     except AudioPipelineError as exc:
         recording.status = "error"
         recording.processed_at = None
+        save_recording_progress(
+            db,
+            recording,
+            stage="error",
+            message="Audio append finalization failed.",
+            error_message=str(exc),
+            percent=0,
+            commit=False,
+        )
         db.commit()
         raise bad_request(str(exc)) from exc
     except Exception as exc:
         recording.status = "error"
         recording.processed_at = None
+        save_recording_progress(
+            db,
+            recording,
+            stage="error",
+            message="Unexpected audio append finalization error.",
+            error_message=str(exc),
+            percent=0,
+            commit=False,
+        )
         db.commit()
         logger.error(
             "Unexpected audio append finalization error for recording %d: %s",
@@ -240,6 +289,12 @@ async def append_recording_audio(
     recording.duration_seconds = finalized.vad_duration_seconds
     recording.status = "ready"
     recording.processed_at = None
+    reset_recording_progress(
+        recording,
+        stage="ready",
+        message="Combined audio is finalized and ready for transcription.",
+        percent=0,
+    )
     db.commit()
     db.refresh(recording)
 
@@ -269,6 +324,19 @@ def get_recording(recording_id: int, db: Session = Depends(get_db)) -> Recording
         raise not_found("Recording", recording_id)
 
     return build_recording_detail(recording)
+
+
+@router.get(
+    "/{recording_id}/progress",
+    response_model=RecordingProgressOut,
+    summary="Get lightweight processing progress for a recording",
+)
+def get_recording_progress(recording_id: int, db: Session = Depends(get_db)) -> RecordingProgressOut:
+    recording = db.get(Recording, recording_id)
+    if recording is None:
+        raise not_found("Recording", recording_id)
+
+    return build_recording_progress(recording)
 
 
 @router.patch(
@@ -369,7 +437,7 @@ async def trigger_processing(
     """
     Run the full pipeline on a ``ready`` recording:
 
-    1. Transcribe the VAD-filtered WAV chunks via a multimodal LLM.
+    1. Transcribe stored VAD-filtered WAV chunks via a multimodal LLM.
     2. Concatenate chunk transcriptions into one complete transcript.
     3. Analyze chapter boundaries from the complete transcript only.
     4. Summarize each analyzed chapter via OpenRouter LLM.

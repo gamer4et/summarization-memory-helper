@@ -6,6 +6,12 @@ let mermaidInitialized = false;
 let mermaidRenderCounter = 0;
 let mermaidModalEscapeHandler = null;
 let mermaidModalResizeHandler = null;
+let mermaidGlobalWheelHandlerAttached = false;
+const MERMAID_LABEL_WRAP_AT = 24;
+const MERMAID_ZOOM_MIN = 0.15;
+const MERMAID_ZOOM_MAX = 4;
+const MERMAID_ZOOM_DRAG_SENSITIVITY = 0.006;
+const MERMAID_ZOOM_WHEEL_SENSITIVITY = 0.002;
 
 export function renderSummaryMarkdown(markdownText) {
   const text = String(markdownText ?? "").trim();
@@ -79,7 +85,8 @@ export async function renderMermaidDiagrams(root = document, retries = 20) {
       securityLevel: "strict",
       theme: "default",
       flowchart: {
-        htmlLabels: true,
+        htmlLabels: false,
+        markdownAutoWrap: true,
         useMaxWidth: false,
       },
     });
@@ -154,11 +161,11 @@ function createMermaidFrame(container, sourceDiagram, renderDiagram, titleText =
 
   const hint = document.createElement("span");
   hint.className = "mermaid-toolbar-hint";
-  hint.textContent = "Большой холст: скроллите по горизонтали или откройте fullscreen";
+  hint.textContent = "Большой холст: тяните мышью для панорамы, Ctrl + колесо или drag вверх/вниз для масштаба";
 
   const chips = document.createElement("div");
   chips.className = "mermaid-toolbar-chips";
-  for (const labelText of ["↔️ drag / scroll", "⛶ focus mode"]) {
+  for (const labelText of ["↔️ drag / scroll pan", "Ctrl + wheel / drag zoom", "⛶ focus mode"]) {
     const chip = document.createElement("span");
     chip.textContent = labelText;
     chips.append(chip);
@@ -204,6 +211,173 @@ function prepareMermaidSvg(container) {
     }
     if (Number.isFinite(height)) svg.dataset.viewBoxHeight = String(height);
   }
+
+  attachMermaidZoom(container);
+}
+
+function clampMermaidZoom(zoom) {
+  return Math.min(MERMAID_ZOOM_MAX, Math.max(MERMAID_ZOOM_MIN, zoom));
+}
+
+function getMermaidSvgBaseWidth(svg) {
+  const storedBaseWidth = Number(svg.dataset.baseWidth);
+  if (Number.isFinite(storedBaseWidth) && storedBaseWidth > 0) return storedBaseWidth;
+
+  const inlineWidth = Number.parseFloat(svg.style.width);
+  const measuredWidth = svg.getBoundingClientRect().width;
+  const viewBoxWidth = Number(svg.dataset.viewBoxWidth);
+  const baseWidth = [inlineWidth, measuredWidth, viewBoxWidth, 920].find(
+    (value) => Number.isFinite(value) && value > 0
+  );
+
+  svg.dataset.baseWidth = String(baseWidth);
+  return baseWidth;
+}
+
+function setMermaidSvgBaseWidth(svg, baseWidth) {
+  if (!Number.isFinite(baseWidth) || baseWidth <= 0) return;
+
+  svg.dataset.baseWidth = String(baseWidth);
+  applyMermaidSvgZoom(svg, Number(svg.dataset.zoom) || 1);
+}
+
+function applyMermaidSvgZoom(svg, zoom) {
+  const baseWidth = getMermaidSvgBaseWidth(svg);
+  const nextZoom = clampMermaidZoom(zoom);
+  const targetWidth = Math.round(baseWidth * nextZoom);
+
+  svg.dataset.zoom = String(nextZoom);
+  svg.style.width = `${targetWidth}px`;
+  svg.style.minWidth = `${targetWidth}px`;
+  svg.style.maxWidth = "none";
+}
+
+function setMermaidSvgZoom(container, svg, zoom, anchorEvent) {
+  const rect = container.getBoundingClientRect();
+  const anchorX = anchorEvent ? anchorEvent.clientX - rect.left : rect.width / 2;
+  const anchorY = anchorEvent ? anchorEvent.clientY - rect.top : rect.height / 2;
+  const scrollRatioX = (container.scrollLeft + anchorX) / Math.max(container.scrollWidth, 1);
+  const scrollRatioY = (container.scrollTop + anchorY) / Math.max(container.scrollHeight, 1);
+
+  applyMermaidSvgZoom(svg, zoom);
+
+  container.scrollLeft = Math.max(0, scrollRatioX * container.scrollWidth - anchorX);
+  container.scrollTop = Math.max(0, scrollRatioY * container.scrollHeight - anchorY);
+}
+
+function attachMermaidZoom(container) {
+  const svg = container.querySelector("svg");
+  if (!svg || container.dataset.mermaidZoomAttached === "true") return;
+
+  ensureMermaidGlobalWheelHandler();
+  container.dataset.mermaidZoomAttached = "true";
+  container.title = "Тяните мышью — двигать граф; Ctrl + drag вверх/вниз — изменить масштаб";
+
+  let interactionState = null;
+
+  container.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+
+    event.preventDefault();
+    interactionState = {
+      mode: event.ctrlKey ? "zoom" : "pan",
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startScrollLeft: container.scrollLeft,
+      startScrollTop: container.scrollTop,
+      startZoom: Number(svg.dataset.zoom) || 1,
+    };
+    container.classList.toggle("mermaid-zooming", interactionState.mode === "zoom");
+    container.classList.toggle("mermaid-panning", interactionState.mode === "pan");
+    container.setPointerCapture?.(event.pointerId);
+  });
+
+  container.addEventListener("pointermove", (event) => {
+    if (!interactionState || event.pointerId !== interactionState.pointerId) return;
+
+    event.preventDefault();
+    if (interactionState.mode === "zoom") {
+      const dragDelta = interactionState.startY - event.clientY;
+      const nextZoom = interactionState.startZoom * Math.exp(dragDelta * MERMAID_ZOOM_DRAG_SENSITIVITY);
+      setMermaidSvgZoom(container, svg, nextZoom, event);
+      return;
+    }
+
+    container.scrollLeft = interactionState.startScrollLeft - (event.clientX - interactionState.startX);
+    container.scrollTop = interactionState.startScrollTop - (event.clientY - interactionState.startY);
+  });
+
+  const stopPointerInteraction = (event) => {
+    if (!interactionState || event.pointerId !== interactionState.pointerId) return;
+
+    container.classList.remove("mermaid-zooming");
+    container.classList.remove("mermaid-panning");
+    container.releasePointerCapture?.(event.pointerId);
+    interactionState = null;
+  };
+
+  container.addEventListener("pointerup", stopPointerInteraction);
+  container.addEventListener("pointercancel", stopPointerInteraction);
+  container.addEventListener("lostpointercapture", () => {
+    container.classList.remove("mermaid-zooming");
+    container.classList.remove("mermaid-panning");
+    interactionState = null;
+  });
+
+  container.addEventListener(
+    "wheel",
+    (event) => {
+      if (!event.ctrlKey) return;
+
+      zoomMermaidFromWheelEvent(container, svg, event);
+    },
+    { passive: false }
+  );
+}
+
+function ensureMermaidGlobalWheelHandler() {
+  if (mermaidGlobalWheelHandlerAttached) return;
+
+  mermaidGlobalWheelHandlerAttached = true;
+  document.addEventListener(
+    "wheel",
+    (event) => {
+      if (!event.ctrlKey) return;
+
+      const container = findMermaidZoomContainer(event.target);
+      const svg = container?.querySelector("svg");
+      if (!container || !svg) return;
+
+      zoomMermaidFromWheelEvent(container, svg, event);
+    },
+    { capture: true, passive: false }
+  );
+}
+
+function findMermaidZoomContainer(target) {
+  if (!(target instanceof Element)) return null;
+
+  const directContainer = target.closest(".mermaid-diagram");
+  if (directContainer) return directContainer;
+
+  const frame = target.closest(".mermaid-frame");
+  if (frame) return frame.querySelector(".mermaid-diagram");
+
+  const modalPanel = target.closest(".mermaid-modal-panel");
+  if (modalPanel) return modalPanel.querySelector(".mermaid-diagram-modal");
+
+  return null;
+}
+
+function zoomMermaidFromWheelEvent(container, svg, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation?.();
+
+  const currentZoom = Number(svg.dataset.zoom) || 1;
+  const nextZoom = currentZoom * Math.exp(-event.deltaY * MERMAID_ZOOM_WHEEL_SENSITIVITY);
+  setMermaidSvgZoom(container, svg, nextZoom, event);
 }
 
 function autoscaleMermaidModalSvg(modalBody) {
@@ -218,9 +392,7 @@ function autoscaleMermaidModalSvg(modalBody) {
   const zoom = window.innerWidth >= 2200 ? 2.05 : window.innerWidth >= 1500 ? 1.85 : 1.65;
   const targetWidth = Math.round(Math.max(viewBoxWidth * zoom, availableWidth * 1.1));
 
-  svg.style.width = `${targetWidth}px`;
-  svg.style.minWidth = `${targetWidth}px`;
-  svg.style.maxWidth = "none";
+  setMermaidSvgBaseWidth(svg, targetWidth);
 }
 
 function openMermaidModal(sourceContainer, sourceDiagram, renderDiagram, titleText = "Граф связей") {
@@ -242,7 +414,7 @@ function openMermaidModal(sourceContainer, sourceDiagram, renderDiagram, titleTe
   title.textContent = titleText || "Граф связей";
 
   const subtitle = document.createElement("p");
-  subtitle.textContent = "Fullscreen canvas for wide diagrams — use wheel, trackpad, or scrollbars to pan.";
+  subtitle.textContent = "Fullscreen canvas: drag with left mouse button to pan; hold Ctrl and use wheel or drag up/down to zoom.";
 
   const titleBlock = document.createElement("div");
   titleBlock.className = "mermaid-modal-title-block";
@@ -265,6 +437,7 @@ function openMermaidModal(sourceContainer, sourceDiagram, renderDiagram, titleTe
 
   const diagramClone = sourceContainer.cloneNode(true);
   diagramClone.classList.add("mermaid-diagram-modal");
+  delete diagramClone.dataset.mermaidZoomAttached;
   prepareMermaidSvg(diagramClone);
   body.append(diagramClone);
 
@@ -464,7 +637,7 @@ export function repairMermaidDiagram(diagram) {
   const lines = String(normalizedDiagram ?? "")
     .replace(/\s+$/g, "")
     .split(/\r?\n/)
-    .map(repairMermaidEdgeLabels);
+    .map((line) => repairMermaidNodeLabels(repairMermaidEdgeLabels(line)));
   let openSubgraphs = 0;
 
   for (const line of lines) {
@@ -480,6 +653,139 @@ export function repairMermaidDiagram(diagram) {
   }
 
   return lines.join("\n").trim();
+}
+
+function repairMermaidNodeLabels(line) {
+  const source = String(line ?? "");
+  const trimmed = source.trim();
+  if (!trimmed || trimmed.startsWith("%%") || !isFlowchartNodeLine(trimmed)) return source;
+
+  let output = "";
+  let index = 0;
+
+  while (index < source.length) {
+    const match = source.slice(index).match(/^([A-Za-z_][\w-]*)(\s*)(\[\[|\[\(|\[|\(\[|\(\(|\(|\{\{|\{)/);
+    if (!match) {
+      output += source[index];
+      index += 1;
+      continue;
+    }
+
+    const matchStart = index;
+    const nodeId = match[1];
+    const whitespace = match[2];
+    const opener = match[3];
+    const labelStart = matchStart + nodeId.length + whitespace.length + opener.length;
+    const closer = getMermaidShapeCloser(opener);
+    const labelEnd = findMermaidLabelEnd(source, labelStart, closer);
+
+    if (labelEnd < 0) {
+      output += source[index];
+      index += 1;
+      continue;
+    }
+
+    const label = source.slice(labelStart, labelEnd);
+    output += `${nodeId}${whitespace}${opener}${wrapMermaidNodeLabel(label)}${closer}`;
+    index = labelEnd + closer.length;
+  }
+
+  return output;
+}
+
+function isFlowchartNodeLine(trimmed) {
+  return !/^(flowchart|graph|subgraph|end\b|classDef\b|class\b|style\b|linkStyle\b|click\b|accTitle\b|accDescr\b|title\b)/i.test(trimmed);
+}
+
+function getMermaidShapeCloser(opener) {
+  return {
+    "[[": "]]",
+    "[(": ")]",
+    "[": "]",
+    "([": "])",
+    "((": "))",
+    "(": ")",
+    "{{": "}}",
+    "{": "}",
+  }[opener] || opener;
+}
+
+function findMermaidLabelEnd(source, start, closer) {
+  let quote = "";
+  let backtick = false;
+
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    const prev = source[index - 1];
+
+    if (char === "`" && prev !== "\\") backtick = !backtick;
+    if (!backtick && (char === '"' || char === "'") && prev !== "\\") {
+      quote = quote === char ? "" : quote || char;
+    }
+
+    if (!quote && !backtick && source.startsWith(closer, index)) return index;
+  }
+
+  return -1;
+}
+
+function wrapMermaidNodeLabel(label) {
+  const parsed = parseMermaidLabel(label);
+  if (!parsed || shouldKeepMermaidLabel(parsed.text)) return label;
+
+  const wrapped = wrapTextForMermaidLabel(parsed.text);
+  if (wrapped === parsed.text) return label;
+
+  return `"\`${escapeMermaidMarkdownLabel(wrapped)}\`"`;
+}
+
+function parseMermaidLabel(label) {
+  const raw = String(label ?? "");
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  const quoted = trimmed.match(/^(["'])([\s\S]*)\1$/);
+  const text = quoted ? quoted[2] : trimmed;
+  const markdown = text.match(/^`([\s\S]*)`$/);
+  return { text: markdown ? markdown[1] : text };
+}
+
+function shouldKeepMermaidLabel(text) {
+  const value = String(text ?? "").trim();
+  return (
+    !value ||
+    value.length <= MERMAID_LABEL_WRAP_AT ||
+    /\r?\n|<br\s*\/?\s*>/i.test(value) ||
+    /`/.test(value)
+  );
+}
+
+function wrapTextForMermaidLabel(text) {
+  const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (normalized.length <= MERMAID_LABEL_WRAP_AT) return normalized;
+
+  const lines = [];
+  let current = "";
+
+  for (const word of normalized.split(" ")) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length <= MERMAID_LABEL_WRAP_AT || !current) {
+      current = candidate;
+      continue;
+    }
+
+    lines.push(current);
+    current = word;
+  }
+
+  if (current) lines.push(current);
+  return lines.join("\n");
+}
+
+function escapeMermaidMarkdownLabel(text) {
+  return String(text ?? "")
+    .replace(/&quot;/g, '"')
+    .replace(/"/g, "#quot;");
 }
 
 function repairMermaidEdgeLabels(line) {

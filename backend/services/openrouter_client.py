@@ -14,7 +14,7 @@ Three functions are exposed:
     treated as chapters.
 
 ``summarize_chapter_sections(text)``
-    Sends a chapter text to five focused OpenRouter chat/completions requests.
+    Sends a chapter text to six focused OpenRouter chat/completions requests.
     Each request returns one strict Markdown section; the sections are assembled
     into one Markdown summary for the existing UI.
 
@@ -30,9 +30,13 @@ import base64
 import asyncio
 import json
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, TypeVar
 
 import httpx
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from tenacity import (
     retry,
     retry_if_exception,
@@ -45,11 +49,16 @@ from backend.core.config import settings
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://openrouter.ai/api/v1"
+_OPENROUTER_REFERER = "https://github.com/summarization-memory-helper"
+_OPENROUTER_TITLE = "Book Summarizer"
+_OPENAI_API_KEY_PLACEHOLDER = "missing-openrouter-api-key"
 
 # Default timeout for non-audio requests (seconds).
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=15.0, read=300.0, write=120.0, pool=10.0)
 
 _WAV_HEADER_SIZE = 44
+
+TStructuredModel = TypeVar("TStructuredModel", bound=BaseModel)
 
 
 def _is_retriable_error(exception: Exception) -> bool:
@@ -59,9 +68,15 @@ def _is_retriable_error(exception: Exception) -> bool:
     Retries only on transient server/network issues.
     Does not retry on 4xx client errors.
     """
+    # Transient provider errors embedded in HTTP 200 envelopes (e.g. 502 from
+    # Google Vertex routed through OpenRouter) are always retriable.
+    if isinstance(exception, OpenRouterProviderError):
+        return True
     if isinstance(exception, httpx.HTTPStatusError):
         # Retry only on 5xx server errors
         return 500 <= exception.response.status_code < 600
+    if isinstance(exception, APIStatusError):
+        return 500 <= exception.status_code < 600
     return isinstance(
         exception,
         (
@@ -69,6 +84,8 @@ def _is_retriable_error(exception: Exception) -> bool:
             httpx.ConnectError,
             httpx.RemoteProtocolError,
             httpx.NetworkError,
+            APITimeoutError,
+            APIConnectionError,
         ),
     )
 
@@ -138,24 +155,17 @@ Return a JSON object with this exact structure:
 """
 
 
-TRANSCRIPTION_RESPONSE_FORMAT: dict = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "audio_transcription",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "full_transcription": {
-                    "type": "string",
-                    "description": "Complete transcription of all speech in the audio fragment.",
-                },
-            },
-            "required": ["full_transcription"],
-            "additionalProperties": False,
-        },
-    },
-}
+class TranscriptionResponse(BaseModel):
+    """Structured response returned by the transcription model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_transcription: str
+
+    @field_validator("full_transcription", mode="before")
+    @classmethod
+    def normalize_full_transcription(cls, value: Any) -> str:
+        return str(value or "").strip()
 
 
 CHAPTER_ANALYSIS_SYSTEM_PROMPT = """You are a transcript structure analysis assistant.
@@ -182,33 +192,27 @@ Return a JSON object with this exact structure:
 Do not invent extra chapters. A long transcript without explicit chapter markers is still one chapter."""
 
 
-CHAPTER_ANALYSIS_RESPONSE_FORMAT: dict = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "chapter_analysis",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "chapters": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "chapter_number": {"type": "integer"},
-                            "title": {"type": "string"},
-                            "transcription": {"type": "string"},
-                        },
-                        "required": ["chapter_number", "title", "transcription"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["chapters"],
-            "additionalProperties": False,
-        },
-    },
-}
+class ChapterAnalysisItem(BaseModel):
+    """One chapter identified in the concatenated transcript."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_number: int
+    title: str = ""
+    transcription: str
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def normalize_title(cls, value: Any) -> str:
+        return str(value or "").strip()
+
+
+class ChapterAnalysisResponse(BaseModel):
+    """Structured response returned by chapter analysis."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chapters: list[ChapterAnalysisItem]
 
 
 CHAPTER_TESTS_SYSTEM_PROMPT = """You are an educational test designer for book learning and spaced repetition.
@@ -242,59 +246,32 @@ Return a JSON object with this exact structure:
 """
 
 
-CHAPTER_TESTS_RESPONSE_FORMAT: dict = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "chapter_tests",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "questions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "question": {"type": "string"},
-                            "options": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                            },
-                            "correct_option_index": {"type": "integer"},
-                            "explanation": {"type": "string"},
-                            "option_explanations": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                            },
-                            "difficulty": {"type": "string"},
-                            "concept_tags": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                            },
-                        },
-                        "required": [
-                            "question",
-                            "options",
-                            "correct_option_index",
-                            "explanation",
-                            "option_explanations",
-                            "difficulty",
-                            "concept_tags",
-                        ],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["questions"],
-            "additionalProperties": False,
-        },
-    },
-}
+class ChapterTestQuestion(BaseModel):
+    """One generated multiple-choice question."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str
+    options: list[str]
+    correct_option_index: int
+    explanation: str
+    option_explanations: list[str]
+    difficulty: str
+    concept_tags: list[str]
+
+
+class ChapterTestsResponse(BaseModel):
+    """Structured response returned by chapter-test generation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    questions: list[ChapterTestQuestion]
 
 
 SUMMARY_SECTION_ORDER = (
     "graphs",
     "definitions",
+    "tables",
     "dense_summary",
     "key_facts",
     "triples",
@@ -303,7 +280,8 @@ SUMMARY_SECTION_ORDER = (
 
 SUMMARY_SECTION_HEADINGS: dict[str, str] = {
     "graphs": "## Графы",
-    "definitions": "## Определения, таблицы и тезисы",
+    "definitions": "## Определения и тезисы",
+    "tables": "## Таблицы",
     "dense_summary": "## Плотная сводка",
     "key_facts": "## Ключевые факты",
     "triples": "## Триплеты",
@@ -312,7 +290,8 @@ SUMMARY_SECTION_HEADINGS: dict[str, str] = {
 
 SUMMARY_SECTION_EMPTY_MESSAGES: dict[str, str] = {
     "graphs": "— Явных графовых структур в главе нет или модель вернула пустой ответ.",
-    "definitions": "— Определения, таблицы и тезисы не извлечены: модель вернула пустой ответ.",
+    "definitions": "— Определения и тезисы не извлечены: модель вернула пустой ответ.",
+    "tables": "— Таблицы не извлечены: модель вернула пустой ответ.",
     "dense_summary": "— Плотная сводка недоступна: модель вернула пустой ответ.",
     "key_facts": "— Ключевые факты не извлечены: модель вернула пустой ответ.",
     "triples": "— Триплеты не извлечены: модель вернула пустой ответ.",
@@ -342,26 +321,22 @@ flowchart LR
 ```
 
 Repeat graph subsections as needed. Output no text outside this section.""",
-    "definitions": """You extract definitions, tables, and theses from a chapter transcript.
+    "definitions": """You extract definitions, theses, distinctions, rules, exceptions, and caveats from a chapter transcript.
 Return only Markdown in the requested output language. Do not return JSON.
 
 Rules:
 1. Use only the transcript. Do not invent or import external knowledge.
-2. Extract absolutely all definitions, explicit terms, distinctions, rules, claims, theses, exceptions, caveats, classifications, and table-like structures present in the chapter.
-3. Treat the transcript as imperfect speech: ignore obvious filler and ASR glitches, but never change meaning.
-4. Include short source anchors as verbatim quotes where possible.
-5. If a subsection has no items, keep the subsection and write `—` plus a short reason.
+2. Extract absolutely all definitions, explicit terms, distinctions, rules, claims, theses, exceptions, caveats, and classifications present in the chapter.
+3. Do not extract or render table-like structures here. They belong only to the separate `## Таблицы` section.
+4. Treat the transcript as imperfect speech: ignore obvious filler and ASR glitches, but never change meaning.
+5. Include short source anchors as verbatim quotes where possible.
+6. If a subsection has no items, keep the subsection and write `—` plus a short reason.
 
 Strict format:
-## Определения, таблицы и тезисы
+## Определения и тезисы
 
 ### Определения
 - **<term>** — <definition>. *Источник:* «<short quote>»
-
-### Таблицы и структуры
-| Название | Элементы/колонки | Смысл | Источник |
-|---|---|---|---|
-| ... | ... | ... | «...» |
 
 ### Тезисы
 - <thesis>. *Источник:* «<short quote>»
@@ -369,7 +344,35 @@ Strict format:
 ### Исключения и оговорки
 - <exception/caveat>. *Источник:* «<short quote>»
 
+### Классификации и различия
+- <classification/distinction/rule>. *Источник:* «<short quote>»
+
 Output no text outside this section.""",
+    "tables": """You extract every explicit table-like structure from a chapter transcript.
+Return only Markdown in the requested output language. Do not return JSON.
+
+Rules:
+1. Use only the transcript. Do not invent rows, columns, categories, examples, or source anchors.
+2. Extract all explicit tables, matrices, lists of attributes/columns, comparison tables, frameworks, enumerated structures, classifications, scoring sheets, checklists, and parameter sets that are clearer as tables.
+3. Each independent table-like structure must be rendered as its own subsection with its own Markdown table. Never merge unrelated tables into one large table.
+4. Preserve the source structure and column names when the transcript gives them. If the transcript lists only items without explicit columns, use a compact table with columns such as `Элемент`, `Описание/роль`, and `Источник`.
+5. Include a short verbatim source anchor in the `Источник` column for every row where possible.
+6. If the chapter contains no table-like structures, return the heading and `— Таблицы не обнаружены.`
+
+Strict format:
+## Таблицы
+
+### <table title 1>
+| <column 1> | <column 2> | Источник |
+|---|---|---|
+| ... | ... | «<short quote>» |
+
+### <table title 2>
+| <column 1> | <column 2> | Источник |
+|---|---|---|
+| ... | ... | «<short quote>» |
+
+Repeat table subsections as needed. Output no text outside this section.""",
     "dense_summary": """You write a very dense chapter summary.
 Return only Markdown in the requested output language. Do not return JSON.
 
@@ -429,17 +432,172 @@ class OpenRouterError(RuntimeError):
     """Raised when the OpenRouter API returns an unexpected response shape."""
 
 
+class OpenRouterProviderError(OpenRouterError):
+    """Raised when the upstream provider returns a transient error inside a 200 body.
+
+    OpenRouter sometimes wraps provider failures (e.g. 502 "Network connection
+    lost") inside an HTTP 200 response with ``choices[0].error``.  Unlike the
+    base :class:`OpenRouterError`, this exception is considered retriable by
+    :func:`_is_retriable_error` so tenacity will attempt the call again.
+    """
+
+
+@dataclass
+class _StreamCompletionParts:
+    """Content and reasoning metadata collected from a streamed completion."""
+
+    content_parts: list[str] = field(default_factory=list)
+    reasoning_details: list[Any] = field(default_factory=list)
+    reasoning_parts: list[str] = field(default_factory=list)
+    finish_reasons: list[str] = field(default_factory=list)
+    chunk_count: int = 0
+
+    @property
+    def raw_content(self) -> str:
+        return "".join(self.content_parts).strip()
+
+    @property
+    def reasoning(self) -> str:
+        return "".join(self.reasoning_parts).strip()
+
+    @property
+    def has_reasoning(self) -> bool:
+        return bool(self.reasoning_details or self.reasoning)
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 
-def _auth_headers() -> dict[str, str]:
+def _openrouter_extra_headers() -> dict[str, str]:
     return {
-        "Authorization": f"Bearer {settings.openrouter.api_key}",
-        "HTTP-Referer": "https://github.com/summarization-memory-helper",
-        "X-Title": "Book Summarizer",
+        "HTTP-Referer": _OPENROUTER_REFERER,
+        "X-Title": _OPENROUTER_TITLE,
     }
+
+
+def _openrouter_client(timeout: httpx.Timeout | None = None) -> AsyncOpenAI:
+    return AsyncOpenAI(
+        api_key=settings.openrouter.api_key or _OPENAI_API_KEY_PLACEHOLDER,
+        base_url=_BASE_URL,
+        default_headers=_openrouter_extra_headers(),
+        timeout=timeout or _DEFAULT_TIMEOUT,
+    )
+
+
+def _schema_descriptions(configured: dict[str, str] | None) -> dict[str, str]:
+    return dict(configured or {})
+
+
+def _pydantic_json_schema(
+    model: type[BaseModel],
+    *,
+    name: str,
+    descriptions: dict[str, str] | None = None,
+) -> dict:
+    raw_schema = model.model_json_schema()
+    definitions = raw_schema.get("$defs") if isinstance(raw_schema.get("$defs"), dict) else {}
+
+    def resolve_ref(ref: str) -> dict[str, Any]:
+        prefix = "#/$defs/"
+        if not ref.startswith(prefix):
+            raise OpenRouterError(f"Unsupported JSON schema reference generated for {model.__name__}: {ref}")
+        definition_name = ref[len(prefix):]
+        definition = definitions.get(definition_name)
+        if not isinstance(definition, dict):
+            raise OpenRouterError(
+                f"JSON schema reference {ref!r} for {model.__name__} points to a missing definition."
+            )
+        return definition
+
+    def strict_schema(node: Any) -> Any:
+        if not isinstance(node, dict):
+            if isinstance(node, list):
+                return [strict_schema(item) for item in node]
+            return node
+
+        if "$ref" in node:
+            resolved = dict(resolve_ref(str(node["$ref"])))
+            for key, value in node.items():
+                if key != "$ref":
+                    resolved[key] = value
+            return strict_schema(resolved)
+
+        strict_node: dict[str, Any] = {}
+        for key, value in node.items():
+            if key in {"$defs", "title", "default"}:
+                continue
+            strict_node[key] = strict_schema(value)
+
+        properties = strict_node.get("properties")
+        if isinstance(properties, dict):
+            strict_node["additionalProperties"] = False
+            strict_node["required"] = list(properties.keys())
+
+        return strict_node
+
+    schema = strict_schema(raw_schema)
+    configured_descriptions = _schema_descriptions(descriptions)
+
+    def apply_description(node: dict[str, Any]) -> None:
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            for property_name, property_schema in properties.items():
+                if (
+                    property_name in configured_descriptions
+                    and isinstance(property_schema, dict)
+                ):
+                    property_schema["description"] = configured_descriptions[property_name]
+                if isinstance(property_schema, dict):
+                    apply_description(property_schema)
+
+        items = node.get("items")
+        if isinstance(items, dict):
+            apply_description(items)
+
+        definitions = node.get("$defs")
+        if isinstance(definitions, dict):
+            for definition in definitions.values():
+                if isinstance(definition, dict):
+                    apply_description(definition)
+
+    apply_description(schema)
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": name,
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+
+def _transcription_response_format() -> dict:
+    s = settings.openrouter.transcription
+    return _pydantic_json_schema(
+        TranscriptionResponse,
+        name=s.response_schema_name,
+        descriptions=s.schema_descriptions,
+    )
+
+
+def _chapter_analysis_response_format() -> dict:
+    s = settings.openrouter.summarization
+    return _pydantic_json_schema(
+        ChapterAnalysisResponse,
+        name=s.chapter_analysis_schema_name,
+        descriptions=s.chapter_analysis_schema_descriptions,
+    )
+
+
+def _chapter_tests_response_format() -> dict:
+    s = settings.openrouter.summarization
+    return _pydantic_json_schema(
+        ChapterTestsResponse,
+        name=s.chapter_tests_schema_name,
+        descriptions=s.chapter_tests_schema_descriptions,
+    )
 
 
 def _parse_strict_llm_json_object(raw_content: str, label: str) -> dict:
@@ -462,6 +620,456 @@ def _parse_strict_llm_json_object(raw_content: str, label: str) -> dict:
             f"{label} LLM returned JSON but not an object: {raw_content!r}"
         )
     return result
+
+
+def _normalize_provider_error(error: Any) -> dict[str, Any] | None:
+    if error is None:
+        return None
+    if isinstance(error, dict):
+        return error
+    if isinstance(error, BaseModel):
+        return error.model_dump()
+    code = getattr(error, "code", None)
+    message = getattr(error, "message", None)
+    metadata = getattr(error, "metadata", None)
+    if code is None and message is None and metadata is None:
+        return {"message": str(error)}
+    return {"code": code, "message": message or "", "metadata": metadata or {}}
+
+
+def _raise_provider_error(label: str, error: Any) -> None:
+    provider_error = _normalize_provider_error(error) or {}
+    err_code = provider_error.get("code")
+    err_msg = provider_error.get("message", "")
+    metadata = provider_error.get("metadata") or {}
+    err_type = metadata.get("error_type") if isinstance(metadata, dict) else ""
+    logger.error(
+        "%s response contains provider error (code=%r, type=%r, message=%r). Marking as retriable.",
+        label,
+        err_code,
+        err_type,
+        err_msg,
+    )
+    raise OpenRouterProviderError(
+        f"Upstream provider returned an error in {label} "
+        f"(code={err_code!r}, type={err_type!r}): {err_msg}"
+    )
+
+
+def _model_dump(model: BaseModel) -> dict:
+    return model.model_dump(mode="json")
+
+
+def _request_extra_body(
+    *,
+    reasoning_effort: str | None = None,
+    extra_body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    merged_extra_body = dict(extra_body or {})
+    if reasoning_effort:
+        merged_extra_body["reasoning"] = {"effort": reasoning_effort}
+    return merged_extra_body
+
+
+def _transcription_extra_body() -> dict[str, Any]:
+    transcription_settings = settings.openrouter.transcription
+    provider: dict[str, Any] = {}
+    if transcription_settings.provider_order:
+        provider["order"] = list(transcription_settings.provider_order)
+    if transcription_settings.provider_allow_fallbacks is not None:
+        provider["allow_fallbacks"] = transcription_settings.provider_allow_fallbacks
+    if not provider:
+        return {}
+    return {"provider": provider}
+
+
+def _validate_structured_response(
+    model: type[TStructuredModel],
+    raw_content: str,
+    label: str,
+) -> TStructuredModel:
+    result = _parse_strict_llm_json_object(raw_content, label)
+    try:
+        return model.model_validate(result)
+    except ValidationError as exc:
+        raise OpenRouterError(
+            f"{label} JSON failed schema validation: {exc}. Raw result: {result!r}"
+        ) from exc
+
+
+def _completion_text(completion: Any, label: str) -> str:
+    try:
+        choice = completion.choices[0]
+        provider_error = getattr(choice, "error", None)
+        if provider_error:
+            _raise_provider_error(label, provider_error)
+        content = choice.message.content
+    except OpenRouterProviderError:
+        raise
+    except (AttributeError, IndexError, TypeError) as exc:
+        raise OpenRouterError(
+            f"{label} response has unexpected structure: {completion!r}"
+        ) from exc
+
+    if content is None:
+        finish_reason = getattr(choice, "finish_reason", None)
+        raise OpenRouterError(
+            f"{label} model returned null content (finish_reason={finish_reason!r})."
+        )
+    return str(content)
+
+
+async def _create_chat_completion(
+    *,
+    label: str,
+    model: str,
+    messages: list[dict],
+    timeout: httpx.Timeout | None = None,
+    response_format: dict | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    reasoning_effort: str | None = None,
+    extra_body: dict[str, Any] | None = None,
+) -> Any:
+    request: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+    }
+    if response_format is not None:
+        request["response_format"] = response_format
+    if max_tokens is not None:
+        request["max_tokens"] = max_tokens
+    if temperature is not None:
+        request["temperature"] = temperature
+    if top_p is not None:
+        request["top_p"] = top_p
+
+    merged_extra_body = _request_extra_body(
+        reasoning_effort=reasoning_effort,
+        extra_body=extra_body,
+    )
+    if merged_extra_body:
+        request["extra_body"] = merged_extra_body
+
+    logger.debug("%s request via OpenAI client: keys=%s", label, sorted(request.keys()))
+    client = _openrouter_client(timeout=timeout)
+    return await client.chat.completions.create(**request)
+
+
+async def _complete_plain_text(
+    *,
+    label: str,
+    model: str,
+    messages: list[dict],
+    max_tokens: int | None,
+    temperature: float | None,
+    timeout: httpx.Timeout | None = None,
+) -> str:
+    completion = await _create_chat_completion(
+        label=label,
+        model=model,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout=timeout,
+    )
+    return _completion_text(completion, label).strip()
+
+
+async def _complete_structured(
+    *,
+    label: str,
+    model_name: str,
+    messages: list[dict],
+    response_model: type[TStructuredModel],
+    response_format: dict,
+    max_tokens: int | None,
+    temperature: float | None,
+    top_p: float | None = None,
+    timeout: httpx.Timeout | None = None,
+    reasoning_effort: str | None = None,
+    extra_body: dict[str, Any] | None = None,
+) -> TStructuredModel:
+    completion = await _create_chat_completion(
+        label=label,
+        model=model_name,
+        messages=messages,
+        response_format=response_format,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        timeout=timeout,
+        reasoning_effort=reasoning_effort,
+        extra_body=extra_body,
+    )
+    raw_content = _completion_text(completion, label)
+    return _validate_structured_response(response_model, raw_content, label)
+
+
+def _stream_chunk_error(chunk: Any) -> Any:
+    error = getattr(chunk, "error", None)
+    if error:
+        return error
+    if isinstance(chunk, dict):
+        return chunk.get("error")
+    return None
+
+
+def _stream_chunk_delta_content(chunk: Any) -> str:
+    try:
+        choices = chunk.choices
+        if not choices:
+            return ""
+        delta = choices[0].delta
+        content = getattr(delta, "content", None)
+    except (AttributeError, IndexError, TypeError):
+        if not isinstance(chunk, dict):
+            return ""
+        choices = chunk.get("choices") or []
+        if not choices:
+            return ""
+        delta = choices[0].get("delta") or {}
+        content = delta.get("content")
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or ""))
+            else:
+                parts.append(str(getattr(item, "text", None) or item))
+        return "".join(parts)
+    return str(content or "")
+
+
+def _stream_chunk_choice(chunk: Any) -> Any:
+    try:
+        choices = chunk.choices
+    except AttributeError:
+        if not isinstance(chunk, dict):
+            return None
+        choices = chunk.get("choices") or []
+    if not choices:
+        return None
+    try:
+        return choices[0]
+    except (IndexError, TypeError):
+        return None
+
+
+def _stream_choice_delta(choice: Any) -> Any:
+    if choice is None:
+        return None
+    if isinstance(choice, dict):
+        return choice.get("delta") or {}
+    return getattr(choice, "delta", None)
+
+
+def _stream_choice_finish_reason(choice: Any) -> str:
+    if choice is None:
+        return ""
+    if isinstance(choice, dict):
+        return str(choice.get("finish_reason") or "")
+    return str(getattr(choice, "finish_reason", None) or "")
+
+
+def _stream_delta_value(delta: Any, key: str) -> Any:
+    if delta is None:
+        return None
+    if isinstance(delta, dict):
+        return delta.get(key)
+    return getattr(delta, key, None)
+
+
+def _stream_chunk_delta_reasoning_details(chunk: Any) -> list[Any]:
+    choice = _stream_chunk_choice(chunk)
+    delta = _stream_choice_delta(choice)
+    details = _stream_delta_value(delta, "reasoning_details")
+    if details is None:
+        return []
+    if isinstance(details, list):
+        return details
+    return [details]
+
+
+def _stream_chunk_delta_reasoning(chunk: Any) -> str:
+    choice = _stream_chunk_choice(chunk)
+    delta = _stream_choice_delta(choice)
+    reasoning = _stream_delta_value(delta, "reasoning")
+    if reasoning is None:
+        reasoning = _stream_delta_value(delta, "reasoning_content")
+    if isinstance(reasoning, list):
+        parts: list[str] = []
+        for item in reasoning:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("summary") or ""))
+            else:
+                parts.append(str(getattr(item, "text", None) or item))
+        return "".join(parts)
+    return str(reasoning or "")
+
+
+async def _collect_structured_stream(
+    stream: Any,
+    *,
+    label: str,
+) -> _StreamCompletionParts:
+    parts = _StreamCompletionParts()
+    async for chunk in stream:
+        parts.chunk_count += 1
+        error = _stream_chunk_error(chunk)
+        if error:
+            _raise_provider_error(label, error)
+
+        choice = _stream_chunk_choice(chunk)
+        finish_reason = _stream_choice_finish_reason(choice)
+        if finish_reason:
+            parts.finish_reasons.append(finish_reason)
+
+        content = _stream_chunk_delta_content(chunk)
+        if content:
+            parts.content_parts.append(content)
+
+        reasoning_details = _stream_chunk_delta_reasoning_details(chunk)
+        if reasoning_details:
+            parts.reasoning_details.extend(reasoning_details)
+
+        reasoning = _stream_chunk_delta_reasoning(chunk)
+        if reasoning:
+            parts.reasoning_parts.append(reasoning)
+    return parts
+
+
+def _continuation_messages_from_stream_reasoning(
+    messages: list[dict],
+    parts: _StreamCompletionParts,
+) -> list[dict]:
+    assistant_message: dict[str, Any] = {"role": "assistant", "content": ""}
+    if parts.reasoning_details:
+        assistant_message["reasoning_details"] = parts.reasoning_details
+    elif parts.reasoning:
+        assistant_message["reasoning"] = parts.reasoning
+
+    return [
+        *messages,
+        assistant_message,
+        {
+            "role": "user",
+            "content": (
+                "Continue from your preserved reasoning and produce the final answer now. "
+                "Return only the JSON object that matches the requested response schema. "
+                "Do not add markdown, commentary, or analysis."
+            ),
+        },
+    ]
+
+
+def _streaming_request(
+    *,
+    model_name: str,
+    messages: list[dict],
+    response_format: dict,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    reasoning_effort: str | None = None,
+    extra_body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "model": model_name,
+        "messages": messages,
+        "response_format": response_format,
+        "stream": True,
+    }
+    if max_tokens is not None:
+        request["max_tokens"] = max_tokens
+    if temperature is not None:
+        request["temperature"] = temperature
+    if top_p is not None:
+        request["top_p"] = top_p
+    merged_extra_body = _request_extra_body(
+        reasoning_effort=reasoning_effort,
+        extra_body=extra_body,
+    )
+    if merged_extra_body:
+        request["extra_body"] = merged_extra_body
+    return request
+
+
+async def _complete_structured_streaming(
+    *,
+    label: str,
+    model_name: str,
+    messages: list[dict],
+    response_model: type[TStructuredModel],
+    response_format: dict,
+    timeout: httpx.Timeout,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    reasoning_effort: str | None = None,
+    extra_body: dict[str, Any] | None = None,
+) -> TStructuredModel:
+    request = _streaming_request(
+        model_name=model_name,
+        messages=messages,
+        response_format=response_format,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        reasoning_effort=reasoning_effort,
+        extra_body=extra_body,
+    )
+
+    client = _openrouter_client(timeout=timeout)
+    stream = await client.chat.completions.create(**request)
+    streamed = await _collect_structured_stream(stream, label=label)
+
+    if streamed.raw_content:
+        return _validate_structured_response(response_model, streamed.raw_content, label)
+
+    if streamed.has_reasoning:
+        logger.warning(
+            "%s streaming response produced reasoning without final content "
+            "(chunks=%d, reasoning_details=%d, reasoning_chars=%d, finish_reasons=%s). "
+            "Issuing one push-to-continue request with preserved reasoning metadata.",
+            label,
+            streamed.chunk_count,
+            len(streamed.reasoning_details),
+            len(streamed.reasoning),
+            streamed.finish_reasons,
+        )
+        continuation_request = _streaming_request(
+            model_name=model_name,
+            messages=_continuation_messages_from_stream_reasoning(messages, streamed),
+            response_format=response_format,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            reasoning_effort=reasoning_effort,
+            extra_body=extra_body,
+        )
+        continuation_stream = await client.chat.completions.create(**continuation_request)
+        continuation = await _collect_structured_stream(
+            continuation_stream,
+            label=f"{label} continuation",
+        )
+        if continuation.raw_content:
+            return _validate_structured_response(
+                response_model,
+                continuation.raw_content,
+                label,
+            )
+        raise OpenRouterProviderError(
+            f"{label} continuation after reasoning-only stream produced no content "
+            f"(chunks={continuation.chunk_count}, reasoning_details={len(continuation.reasoning_details)}, "
+            f"reasoning_chars={len(continuation.reasoning)}, finish_reasons={continuation.finish_reasons})."
+        )
+
+    if not streamed.raw_content:
+        raise OpenRouterProviderError(f"{label} streaming response produced no content.")
+    return _validate_structured_response(response_model, streamed.raw_content, label)
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +1153,15 @@ async def transcribe_audio(
 
     # Encode the WAV file as base64.
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+    estimated_json_audio_bytes = len(audio_b64.encode("utf-8"))
+    logger.info(
+        "Prepared transcription payload for %s: wav_bytes=%d base64_bytes=%d model=%s stream=%s",
+        path.name,
+        audio_size,
+        estimated_json_audio_bytes,
+        settings.openrouter.transcription.model,
+        settings.openrouter.transcription.stream,
+    )
 
     context_text = str(previous_context or "").strip()
     text_instruction = (
@@ -583,43 +1200,39 @@ async def transcribe_audio(
         },
     ]
 
-    payload: dict = {
-        "model": settings.openrouter.transcription.model,
-        "messages": messages,
-        "response_format": TRANSCRIPTION_RESPONSE_FORMAT,
-    }
-
-    headers = {**_auth_headers(), "Content-Type": "application/json"}
-
+    transcription_settings = settings.openrouter.transcription
+    extra_body = _transcription_extra_body()
     timeout = _calculate_transcription_timeout(audio_size)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            f"{_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
+    if transcription_settings.stream:
+        parsed = await _complete_structured_streaming(
+            label="Transcription",
+            model_name=transcription_settings.model,
+            messages=messages,
+            response_model=TranscriptionResponse,
+            response_format=_transcription_response_format(),
+            timeout=timeout,
+            max_tokens=transcription_settings.max_tokens,
+            temperature=transcription_settings.temperature,
+            top_p=transcription_settings.top_p,
+            reasoning_effort=transcription_settings.thinking_effort,
+            extra_body=extra_body,
+        )
+    else:
+        parsed = await _complete_structured(
+            label="Transcription",
+            model_name=transcription_settings.model,
+            messages=messages,
+            response_model=TranscriptionResponse,
+            response_format=_transcription_response_format(),
+            timeout=timeout,
+            max_tokens=transcription_settings.max_tokens,
+            temperature=transcription_settings.temperature,
+            top_p=transcription_settings.top_p,
+            reasoning_effort=transcription_settings.thinking_effort,
+            extra_body=extra_body,
         )
 
-    _log_response(response, "transcription")
-    response.raise_for_status()
-
-    body = response.json()
-    try:
-        raw_content: str = body["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise OpenRouterError(
-            f"Transcription response has unexpected structure: {body!r}"
-        ) from exc
-
-    result = _parse_strict_llm_json_object(raw_content, "Transcription")
-
-    # Validate required keys.
-    if "full_transcription" not in result:
-        raise OpenRouterError(
-            f"Transcription JSON missing required keys "
-            f"('full_transcription'): {result!r}"
-        )
-
-    result = {"full_transcription": str(result.get("full_transcription") or "").strip()}
+    result = _model_dump(parsed)
     logger.info(
         "Transcription complete: %d chars",
         len(result["full_transcription"]),
@@ -654,9 +1267,10 @@ async def analyze_transcription_chapters(text: str, language: str = "ru") -> dic
         language,
     )
 
-    payload: dict = {
-        "model": s.model,
-        "messages": [
+    parsed = await _complete_structured(
+        label="Chapter analysis",
+        model_name=s.model,
+        messages=[
             {"role": "system", "content": CHAPTER_ANALYSIS_SYSTEM_PROMPT},
             {
                 "role": "user",
@@ -667,37 +1281,13 @@ async def analyze_transcription_chapters(text: str, language: str = "ru") -> dic
                 ),
             },
         ],
-        "response_format": CHAPTER_ANALYSIS_RESPONSE_FORMAT,
-        "max_tokens": s.max_tokens,
-        "temperature": 0.0,
-    }
-
-    headers = {**_auth_headers(), "Content-Type": "application/json"}
-
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        response = await client.post(
-            f"{_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-
-    _log_response(response, "chapter analysis")
-    response.raise_for_status()
-
-    body = response.json()
-    try:
-        raw_content: str = body["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise OpenRouterError(
-            f"Chapter analysis response has unexpected structure: {body!r}"
-        ) from exc
-
-    result = _parse_strict_llm_json_object(raw_content, "Chapter analysis")
-
-    if "chapters" not in result or not isinstance(result["chapters"], list):
-        raise OpenRouterError(
-            f"Chapter analysis JSON missing required 'chapters' list: {result!r}"
-        )
+        response_model=ChapterAnalysisResponse,
+        response_format=_chapter_analysis_response_format(),
+        max_tokens=s.max_tokens,
+        temperature=0.0,
+        timeout=_DEFAULT_TIMEOUT,
+    )
+    result = _model_dump(parsed)
 
     logger.info("Chapter analysis complete: %d chapter(s)", len(result["chapters"]))
     return result
@@ -725,7 +1315,7 @@ async def summarize_text(text: str) -> str:
 
     Raises
     ------
-    httpx.HTTPStatusError
+    openai.APIStatusError
         On 4xx / 5xx responses from OpenRouter.
     OpenRouterError
         When the JSON response does not contain the expected structure.
@@ -743,35 +1333,17 @@ async def summarize_text(text: str) -> str:
         "Сгенерируй ответ."
     )
 
-    payload: dict = {
-        "model": s.model,
-        "messages": [
+    summary = await _complete_plain_text(
+        label="Summarization",
+        model=s.model,
+        messages=[
             {"role": "system", "content": s.system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "max_tokens": s.max_tokens,
-        "temperature": s.temperature,
-    }
-
-    headers = {**_auth_headers(), "Content-Type": "application/json"}
-
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        response = await client.post(
-            f"{_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-
-    _log_response(response, "summarization")
-    response.raise_for_status()
-
-    body = response.json()
-    try:
-        summary: str = body["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, TypeError) as exc:
-        raise OpenRouterError(
-            f"Summarization response has unexpected structure: {body!r}"
-        ) from exc
+        max_tokens=s.max_tokens,
+        temperature=s.temperature,
+        timeout=_DEFAULT_TIMEOUT,
+    )
 
     logger.info("Summarization complete: %d chars", len(summary))
     return summary
@@ -828,42 +1400,21 @@ async def _summarize_chapter_section(text: str, section_key: str) -> str:
         "Не добавляй вступление, заключение или комментарии вне секции."
     )
 
-    payload: dict = {
-        "model": s.model,
-        "messages": [
+    section_markdown = await _complete_plain_text(
+        label=f"Summary section {section_key}",
+        model=s.model,
+        messages=[
             {"role": "system", "content": SUMMARY_SECTION_SYSTEM_PROMPTS[section_key]},
             {"role": "user", "content": user_prompt},
         ],
-        "max_tokens": s.max_tokens,
-        "temperature": s.temperature,
-    }
-
-    headers = {**_auth_headers(), "Content-Type": "application/json"}
-
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        response = await client.post(
-            f"{_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-
-    _log_response(response, f"summary section {section_key}")
-    response.raise_for_status()
-
-    body = response.json()
-    try:
-        raw_content = body["choices"][0]["message"].get("content")
-    except (KeyError, IndexError, TypeError) as exc:
-        raise OpenRouterError(
-            f"Summary section '{section_key}' response has unexpected structure: {body!r}"
-        ) from exc
-
-    section_markdown = str(raw_content or "").strip()
+        max_tokens=s.max_tokens,
+        temperature=s.temperature,
+        timeout=_DEFAULT_TIMEOUT,
+    )
     if not section_markdown:
         logger.warning(
-            "Summary section '%s' response content is empty/null; using fallback Markdown section. Body: %r",
+            "Summary section '%s' response content is empty/null; using fallback Markdown section.",
             section_key,
-            body,
         )
         section_markdown = _empty_summary_section_markdown(section_key)
 
@@ -882,10 +1433,10 @@ async def _summarize_chapter_section(text: str, section_key: str) -> str:
     wait=wait_exponential(multiplier=2, min=5, max=30),
     reraise=True,
 )
-async def summarize_chapter_sections(text: str) -> dict:
+async def summarize_chapter_sections(text: str, progress_callback=None) -> dict:
     """Generate all chapter summary sections as strict Markdown.
 
-    The five calls are launched in parallel because they read the same chapter
+    The six calls are launched in parallel because they read the same chapter
     transcript and have no dependencies on each other. Any failed section fails
     the whole attempt, keeping the existing processing error semantics.
     """
@@ -893,11 +1444,14 @@ async def summarize_chapter_sections(text: str) -> dict:
     if not transcript:
         raise ValueError("Cannot summarize an empty chapter transcription.")
 
+    async def run_section(section_key: str) -> str:
+        value = await _summarize_chapter_section(transcript, section_key)
+        if progress_callback is not None:
+            progress_callback(section_key)
+        return value
+
     section_values = await asyncio.gather(
-        *(
-            _summarize_chapter_section(transcript, section_key)
-            for section_key in SUMMARY_SECTION_ORDER
-        )
+        *(run_section(section_key) for section_key in SUMMARY_SECTION_ORDER)
     )
     sections = dict(zip(SUMMARY_SECTION_ORDER, section_values, strict=True))
     summary_text = assemble_summary_markdown(sections)
@@ -937,9 +1491,10 @@ async def generate_chapter_tests(
         s.model,
     )
 
-    payload: dict = {
-        "model": s.model,
-        "messages": [
+    parsed = await _complete_structured(
+        label="Chapter tests",
+        model_name=s.model,
+        messages=[
             {"role": "system", "content": CHAPTER_TESTS_SYSTEM_PROMPT},
             {
                 "role": "user",
@@ -952,60 +1507,13 @@ async def generate_chapter_tests(
                 ),
             },
         ],
-        "response_format": CHAPTER_TESTS_RESPONSE_FORMAT,
-        "max_tokens": s.max_tokens,
-        "temperature": 0.2,
-    }
-
-    headers = {**_auth_headers(), "Content-Type": "application/json"}
-
-    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        response = await client.post(
-            f"{_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-
-    _log_response(response, "chapter tests")
-    response.raise_for_status()
-
-    body = response.json()
-    try:
-        raw_content: str = body["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise OpenRouterError(
-            f"Chapter tests response has unexpected structure: {body!r}"
-        ) from exc
-
-    result = _parse_strict_llm_json_object(raw_content, "Chapter tests")
-    if "questions" not in result or not isinstance(result["questions"], list):
-        raise OpenRouterError(
-            f"Chapter tests JSON missing required 'questions' list: {result!r}"
-        )
+        response_model=ChapterTestsResponse,
+        response_format=_chapter_tests_response_format(),
+        max_tokens=s.max_tokens,
+        temperature=0.2,
+        timeout=_DEFAULT_TIMEOUT,
+    )
+    result = _model_dump(parsed)
 
     logger.info("Chapter test generation complete: %d question(s)", len(result["questions"]))
     return result
-
-
-# ---------------------------------------------------------------------------
-# Logging helper
-# ---------------------------------------------------------------------------
-
-
-def _log_response(response: httpx.Response, label: str) -> None:
-    logger.debug(
-        "%s response: status=%d url=%s",
-        label,
-        response.status_code,
-        str(response.url),
-    )
-    if response.status_code >= 400:
-        try:
-            body_text = response.text
-        except Exception:
-            body_text = "<unreadable>"
-        logger.error(
-            "%s ERROR response body: %s",
-            label,
-            body_text,
-        )

@@ -12,6 +12,7 @@
 import { api, ApiError, processRecording } from "../api.js";
 import { showToast } from "../app.js";
 import { renderMermaidDiagrams, renderSummaryWithTranscriptGraphs } from "../summaryRenderer.js";
+import { renderProcessingProgress, renderProgressPlaceholder, startProgressPolling } from "./processingProgress.js";
 
 /**
  * @param {HTMLElement} container
@@ -86,25 +87,45 @@ export async function renderBookDetail(
       const recordingId = Number(btn.dataset.recordingId);
       const recording = findRecording(book, recordingId);
       const defaultLabel = btn.dataset.defaultLabel || btn.textContent.trim() || "Process";
+      const progressHost = container.querySelector(`[data-progress-recording-id="${recordingId}"]`);
 
       if (recording?.status === "completed" && !confirm(recordingReprocessMessage(recording))) return;
 
       btn.disabled = true;
       btn.textContent = recording?.status === "completed" ? "Reprocessing…" : "Processing…";
+      showProgressPlaceholder(progressHost, "Starting processing…");
+      const stopPolling = attachRecordingProgressPolling(progressHost, recordingId);
 
       try {
         const result = await processRecording(recordingId, "ru");
+        stopPolling();
+        renderProgressInto(progressHost, result.progress || {
+          status: "completed",
+          stage: "completed",
+          message: "Processing complete.",
+          percent: 100,
+        });
         const verb = recording?.status === "completed" ? "Reprocessing" : "Processing";
         showToast(`${verb} complete: ${result.chapters?.length ?? 0} chapter(s).`, "success");
         onViewResults(recordingId);
       } catch (err) {
+        stopPolling();
         const detail = err instanceof ApiError ? err.detail : err.message;
+        renderProgressInto(progressHost, {
+          status: "error",
+          stage: "error",
+          message: "Processing failed.",
+          error_message: detail,
+          percent: 0,
+        });
         showToast(`Processing failed: ${detail}`, "error", 6000);
         btn.disabled = false;
         btn.textContent = defaultLabel;
       }
     });
   });
+
+  startExistingProcessingPollers(container, book, options);
 
   container.querySelectorAll("[data-action='delete-recording']").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -228,6 +249,9 @@ function buildRecordingCardHTML(recording) {
         </div>
 
         <p class="recording-result-note">${escHtml(statusDescription(status))}</p>
+        <div class="recording-progress-host" data-progress-recording-id="${recording.id}">
+          ${shouldShowRecordingProgress(recording) ? renderProcessingProgress(recording.progress, { compact: true }) : ""}
+        </div>
         ${buildInlineResultsHTML(recording)}
       </div>
 
@@ -482,6 +506,57 @@ function canContinueRecording(recording) {
   return ["ready", "completed", "error"].includes(recording.status);
 }
 
+function shouldShowRecordingProgress(recording) {
+  const progress = recording.progress;
+  if (!progress) return false;
+  if (recording.status === "processing") return true;
+  if (progress.stage === "error") return true;
+  return Boolean(progress.updated_at && ["completed", "summarizing", "transcribing", "persisting"].includes(progress.stage));
+}
+
+function startExistingProcessingPollers(container, book, options) {
+  (book.recordings || [])
+    .filter((recording) => recording.status === "processing")
+    .forEach((recording) => {
+      const progressHost = container.querySelector(`[data-progress-recording-id="${recording.id}"]`);
+      attachRecordingProgressPolling(progressHost, recording.id, {
+        onTerminal(progress) {
+          if (progress.status === "completed" || progress.stage === "completed") {
+            showToast(`Recording #${recording.id} processing complete.`, "success");
+          }
+          refreshBookDetailAfterProcessing(container, options);
+        },
+      });
+    });
+}
+
+async function refreshBookDetailAfterProcessing(container, options) {
+  if (!container?.isConnected) return;
+  await sleep(350);
+  if (!container?.isConnected) return;
+  await renderBookDetail(container, options);
+}
+
+function attachRecordingProgressPolling(progressHost, recordingId, { onTerminal = null } = {}) {
+  if (!progressHost) return () => {};
+  return startProgressPolling(recordingId, (progress) => {
+    renderProgressInto(progressHost, progress);
+    if ((progress.stage === "completed" || progress.status === "completed" || progress.stage === "error" || progress.status === "error") && onTerminal) {
+      onTerminal(progress);
+    }
+  });
+}
+
+function showProgressPlaceholder(progressHost, message) {
+  if (!progressHost) return;
+  progressHost.innerHTML = renderProgressPlaceholder(message, { compact: true });
+}
+
+function renderProgressInto(progressHost, progress) {
+  if (!progressHost) return;
+  progressHost.innerHTML = renderProcessingProgress(progress, { compact: true });
+}
+
 function recordingDeleteMessage(recording) {
   return [
     `Delete recording #${recording.id}?`,
@@ -538,6 +613,10 @@ async function hydrateRecordingDetails(recordings) {
       };
     }
   }));
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function statusDescription(status) {

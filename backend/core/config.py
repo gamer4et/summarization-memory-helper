@@ -7,6 +7,7 @@ environment/.env override is ``OPENROUTER_API_KEY``.
 import os
 from pathlib import Path
 from typing import Any
+from typing import Literal
 
 import yaml
 
@@ -53,8 +54,81 @@ class OpenRouterTranscriptionSettings(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    model: str = ""
+    model: str = "google/gemini-3.1-pro-preview"
+    provider_order: list[str] = Field(default_factory=list)
+    provider_allow_fallbacks: bool | None = None
     default_language: str = "ru"
+    stream: bool = True
+    max_tokens: int | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    thinking_effort: Literal["xhigh", "high", "medium", "low", "minimal", "none"] | None = None
+    response_schema_name: str = "audio_transcription"
+    schema_descriptions: dict[str, str] = Field(
+        default_factory=lambda: {
+            "full_transcription": "Complete transcription of all speech in the audio fragment.",
+        }
+    )
+
+    @field_validator("max_tokens", "temperature", "top_p", mode="before")
+    @classmethod
+    def normalize_optional_generation_setting(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @field_validator("provider_order", mode="before")
+    @classmethod
+    def normalize_provider_order(cls, v: Any) -> list[str] | Any:
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()]
+        if isinstance(v, (list, tuple)):
+            return [str(item).strip() for item in v if str(item).strip()]
+        return v
+
+    @field_validator("provider_allow_fallbacks", mode="before")
+    @classmethod
+    def normalize_provider_allow_fallbacks(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @field_validator("max_tokens")
+    @classmethod
+    def validate_max_tokens(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError("max_tokens must be greater than 0 when set")
+        return v
+
+    @field_validator("temperature")
+    @classmethod
+    def validate_temperature(cls, v: float | None) -> float | None:
+        if v is not None and v < 0:
+            raise ValueError("temperature must be greater than or equal to 0 when set")
+        return v
+
+    @field_validator("top_p")
+    @classmethod
+    def validate_top_p(cls, v: float | None) -> float | None:
+        if v is not None and not 0 <= v <= 1:
+            raise ValueError("top_p must be between 0 and 1 when set")
+        return v
+
+    @field_validator("thinking_effort", mode="before")
+    @classmethod
+    def normalize_thinking_effort(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        value = str(v).strip().lower()
+        if not value:
+            return None
+        return value
 
 
 class OpenRouterSummarizationSettings(BaseModel):
@@ -69,6 +143,28 @@ class OpenRouterSummarizationSettings(BaseModel):
     default_modes: str = "dense_summary, key_facts, triples, quotes, categories"
     language: str = "auto"
     density_iterations: int = 3
+    chapter_analysis_schema_name: str = "chapter_analysis"
+    chapter_analysis_schema_descriptions: dict[str, str] = Field(
+        default_factory=lambda: {
+            "chapters": "Ordered chapters detected from explicit spoken chapter markers only.",
+            "chapter_number": "One-based chapter number in transcript order.",
+            "title": "Chapter title inferred from the explicit spoken marker, or a safe fallback.",
+            "transcription": "Transcript text that belongs to this chapter.",
+        }
+    )
+    chapter_tests_schema_name: str = "chapter_tests"
+    chapter_tests_schema_descriptions: dict[str, str] = Field(
+        default_factory=lambda: {
+            "questions": "Multiple-choice questions generated from the chapter transcription.",
+            "question": "Question text.",
+            "options": "Exactly four answer options.",
+            "correct_option_index": "Zero-based index of the only correct option.",
+            "explanation": "Brief explanation of why the correct answer follows from the chapter.",
+            "option_explanations": "Per-option explanations; use an empty string for the correct option.",
+            "difficulty": "Question difficulty label: easy, medium, or hard.",
+            "concept_tags": "Short conceptual tags covered by the question.",
+        }
+    )
 
 
 class OpenRouterSettings(BaseModel):

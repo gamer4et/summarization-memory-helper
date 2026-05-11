@@ -16,6 +16,7 @@
 import { api, ApiError, appendRecordingAudio, processRecording, uploadRecordingAudio } from "../api.js";
 import { AudioRecorder } from "../recorder.js";
 import { showToast } from "../app.js";
+import { renderProcessingProgress, renderProgressPlaceholder, startProgressPolling } from "./processingProgress.js";
 
 /**
  * @param {HTMLElement} container
@@ -216,18 +217,34 @@ export async function renderRecordingPanel(container, { book, appendToRecordingI
 // ---------------------------------------------------------------------------
 
 async function runProcessing(recordingId, language, processEl, onViewChapters) {
-  setProcessingStatus(processEl, "processing", "⏳ Transcribing audio…");
+  setProcessingStatus(processEl, "processing", "");
+  processEl.hidden = false;
+  processEl.innerHTML = renderProgressPlaceholder("Starting transcription and summarization…");
+
+  const stopPolling = startProgressPolling(recordingId, (progress) => {
+    processEl.hidden = false;
+    processEl.className = "processing-status is-processing has-progress";
+    processEl.innerHTML = renderProcessingProgress(progress);
+  });
 
   try {
     const result = await processRecording(recordingId, language);
-    setProcessingStatus(processEl, "success",
-      `✅ Done! ${result.chapters?.length ?? 0} chapter(s) detected.`);
+    stopPolling();
+    processEl.hidden = false;
+    processEl.className = "processing-status is-success has-progress";
+    processEl.innerHTML = renderProcessingProgress(result.progress || {
+      status: "completed",
+      stage: "completed",
+      message: `Done! ${result.chapters?.length ?? 0} chapter(s) detected.`,
+      percent: 100,
+    });
     showToast("Processing complete!", "success");
 
     // Brief pause so user can read the status, then navigate
     await sleep(900);
     onViewChapters(recordingId);
   } catch (err) {
+    stopPolling();
     const detail = err instanceof ApiError ? err.detail : err.message;
     setProcessingStatus(processEl, "error", `❌ Processing failed: ${escHtml(detail)}`);
     showToast("Processing failed — see panel for details.", "error");

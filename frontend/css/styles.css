@@ -467,6 +467,10 @@ input:focus, textarea:focus {
   margin-top: 0.55rem;
 }
 
+.recording-progress-host:not(:empty) {
+  margin-top: 0.85rem;
+}
+
 .recording-inline-results {
   margin-top: 0.9rem;
   padding-top: 0.9rem;
@@ -816,6 +820,121 @@ input:focus, textarea:focus {
   background: #f0faf4;
   border-color: #a8e6be;
   color: #1a7f3c;
+}
+
+.processing-status.has-progress {
+  display: block;
+  color: var(--color-text);
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+.processing-progress {
+  width: 100%;
+  padding: 1rem 1.15rem;
+  border: 1px solid #c5d1fb;
+  border-radius: var(--radius-md);
+  background: #f0f4ff;
+  color: var(--color-text);
+}
+
+.processing-progress.is-compact {
+  padding: 0.8rem 0.9rem;
+  background: rgba(240, 244, 255, 0.68);
+}
+
+.processing-progress.is-success {
+  background: #f0faf4;
+  border-color: #a8e6be;
+}
+
+.processing-progress.is-error {
+  background: #fff0f1;
+  border-color: #ffc8cb;
+}
+
+.processing-progress-topline {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.55rem;
+}
+
+.processing-progress-stage {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.12rem 0.55rem;
+  border-radius: 99px;
+  background: rgba(67, 97, 238, 0.12);
+  color: var(--color-primary);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.045em;
+}
+
+.processing-progress.is-success .processing-progress-stage {
+  background: rgba(45, 198, 83, 0.14);
+  color: #1a7f3c;
+}
+
+.processing-progress.is-error .processing-progress-stage {
+  background: rgba(230, 57, 70, 0.12);
+  color: var(--color-danger);
+}
+
+.processing-progress-percent {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+
+.processing-progress-track {
+  height: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(67, 97, 238, 0.2);
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.86);
+}
+
+.processing-progress-fill {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--color-primary), #6c8cff);
+  transition: width 240ms ease;
+}
+
+.processing-progress.is-success .processing-progress-fill {
+  background: linear-gradient(90deg, #1f9d4c, var(--color-success));
+}
+
+.processing-progress.is-error .processing-progress-fill {
+  background: linear-gradient(90deg, #c62e37, var(--color-danger));
+}
+
+.processing-progress-message {
+  margin-top: 0.55rem;
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+}
+
+.processing-progress-metrics {
+  margin-top: 0.65rem;
+  display: flex;
+  gap: 0.45rem 0.9rem;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+
+.processing-progress-metrics span {
+  display: inline-flex;
+  align-items: center;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── Chapter View ─────────────────────────────────────── */
@@ -1469,10 +1588,27 @@ input:focus, textarea:focus {
     linear-gradient(90deg, rgba(67, 97, 238, 0.055) 1px, transparent 1px),
     radial-gradient(circle at 50% 0, rgba(255,255,255,.98), rgba(248,251,255,.96));
   background-size: 30px 30px, 30px 30px, auto;
+  cursor: grab;
   overflow: auto;
   overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
   scrollbar-color: rgba(67, 97, 238, .45) rgba(67, 97, 238, .08);
   scrollbar-gutter: stable both-edges;
+}
+
+.mermaid-diagram.mermaid-zooming {
+  cursor: ns-resize;
+  user-select: none;
+}
+
+.mermaid-diagram.mermaid-panning {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.mermaid-diagram.mermaid-panning svg,
+.mermaid-diagram.mermaid-zooming svg {
+  pointer-events: none;
 }
 
 .mermaid-diagram svg {
