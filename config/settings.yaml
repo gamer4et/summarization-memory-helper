@@ -16,6 +16,7 @@ audio:
 
 openrouter:
   api_key: ""   # set via OPENROUTER_API_KEY environment variable
+  base_url: "https://polza.ai/api/v1" # OpenAI-compatible API base URL; override with OPENROUTER_BASE_URL, e.g. https://polza.ai/api/v1
   transcription:
     model: "google/gemini-3.1-flash-lite"
     provider_order:
@@ -26,12 +27,12 @@ openrouter:
     max_tokens: 128000
     temperature: 0.1
     top_p: 1.0
-    thinking_effort: none # maps to OpenRouter reasoning.effort; use null/"" to omit
+    thinking_effort: "high" # maps to OpenRouter reasoning.effort; use null/"" to omit
     response_schema_name: "audio_transcription"
     schema_descriptions:
       full_transcription: "Complete transcription of all speech in this audio fragment."
   summarization:
-    model: "google/gemini-3.1-pro-preview"
+    model: "openai/gpt-5.6-terra"
     max_tokens: 512000
     temperature: 0.0
     default_modes: "dense_summary, key_facts, triples, quotes, categories"

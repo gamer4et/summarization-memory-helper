@@ -293,16 +293,18 @@ function buildInlineResultsHTML(recording) {
 }
 
 function buildInlineChapterHTML(chapter) {
-  const title = chapter.title || `Chapter ${chapter.chapter_number}`;
+  const title = deriveChapterTitle(chapter);
   const transcription = chapter.transcription?.raw_text || "No transcription stored.";
   const summary = chapter.summary?.summary_text || "";
 
   return `
     <details class="inline-chapter-card inline-chapter-details">
-      <summary class="inline-chapter-title">
-        <span class="chunk-badge">Chapter ${chapter.chapter_number}</span>
-        <span class="inline-chapter-title-text">${escHtml(title)}</span>
-        <span class="details-hint inline-chapter-details-hint">show chapter</span>
+      <summary class="inline-chapter-title" aria-label="Show stored content for ${escHtml(title)}">
+        <span class="inline-chapter-cta">
+          <span class="inline-chapter-cta-icon" aria-hidden="true">📖</span>
+          <span class="inline-chapter-cta-text">Show summary &amp; transcript</span>
+        </span>
+        <span class="details-hint inline-chapter-details-hint">open</span>
       </summary>
       <div class="inline-chapter-details-body">
         ${summary ? `

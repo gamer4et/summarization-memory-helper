@@ -1,7 +1,7 @@
 """Application configuration.
 
-All non-secret settings are loaded from ``config/settings.yaml``. The only
-environment/.env override is ``OPENROUTER_API_KEY``.
+All non-secret settings are loaded from ``config/settings.yaml``. Secret and
+local endpoint overrides can be supplied via environment variables or ``.env``.
 """
 
 import os
@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _SETTINGS_FILE = Path("config/settings.yaml")
 _ENV_FILE = Path(".env")
+_DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 class AudioSettings(BaseModel):
@@ -174,12 +175,23 @@ class OpenRouterSettings(BaseModel):
 
     # Secret: populated only from OPENROUTER_API_KEY in environment/.env.
     api_key: str = ""
+    base_url: str = _DEFAULT_OPENROUTER_BASE_URL
     transcription: OpenRouterTranscriptionSettings = Field(
         default_factory=OpenRouterTranscriptionSettings
     )
     summarization: OpenRouterSummarizationSettings = Field(
         default_factory=OpenRouterSummarizationSettings
     )
+
+    @field_validator("base_url", mode="before")
+    @classmethod
+    def normalize_base_url(cls, v: Any) -> str:
+        if v is None:
+            return _DEFAULT_OPENROUTER_BASE_URL
+        value = str(v).strip()
+        if not value:
+            return _DEFAULT_OPENROUTER_BASE_URL
+        return value.rstrip("/")
 
 
 class DatabaseSettings(BaseModel):
@@ -236,6 +248,12 @@ def _openrouter_api_key() -> str:
     )
 
 
+def _openrouter_base_url() -> str:
+    return os.environ.get("OPENROUTER_BASE_URL", "") or _read_env_file_value(
+        "OPENROUTER_BASE_URL"
+    )
+
+
 def _build_settings() -> Settings:
     data = _load_yaml_settings()
 
@@ -245,6 +263,9 @@ def _build_settings() -> Settings:
 
     openrouter_cfg = dict(data.get("openrouter") or {})
     openrouter_cfg["api_key"] = _openrouter_api_key()
+    openrouter_base_url = _openrouter_base_url()
+    if openrouter_base_url:
+        openrouter_cfg["base_url"] = openrouter_base_url
 
     return Settings(
         app_name=app_cfg.get("name", "Book Summarizer"),

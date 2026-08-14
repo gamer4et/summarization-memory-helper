@@ -243,6 +243,7 @@ audio:
   min_transcription_audio_bytes: 32044
 
 openrouter:
+  base_url: "https://openrouter.ai/api/v1"
   transcription:
     model: "google/gemini-3.1-pro-preview"
     provider_order:
@@ -268,8 +269,11 @@ openrouter:
     chapter_tests_schema_name: "chapter_tests"
 ```
 
-OpenRouter calls use the official OpenAI Python client configured with the
-OpenRouter-compatible base URL. Transcription sends stored VAD-filtered WAV
+OpenRouter calls use the official OpenAI Python client configured with an
+OpenAI-compatible base URL. By default this is the OpenRouter endpoint
+(`https://openrouter.ai/api/v1`), but you can set `openrouter.base_url` or
+`OPENROUTER_BASE_URL` to another compatible endpoint, for example
+`https://polza.ai/api/v1`. Transcription sends stored VAD-filtered WAV
 chunks (`data/vad_audio/:id_chunks/*.wav`) to the multimodal Gemini LLM through
 chat/completions and asks it to return structured JSON with `full_transcription`.
 The assembled VAD WAV (`data/vad_audio/:id.wav`) remains the browser-playable
@@ -310,6 +314,8 @@ Use `.env` for secrets and local overrides. At minimum, set:
 
 ```dotenv
 OPENROUTER_API_KEY=sk-or-your-real-key-here
+# Optional OpenAI-compatible endpoint override:
+OPENROUTER_BASE_URL=https://polza.ai/api/v1
 ```
 
 You can also override nested settings with environment variables. For example:
@@ -318,6 +324,7 @@ You can also override nested settings with environment variables. For example:
 OPENROUTER__SUMMARIZATION__MODEL=google/gemini-3.1-pro-preview
 AUDIO__VAD_AGGRESSIVENESS=1
 OPENROUTER__SUMMARIZATION__DEFAULT_MODES=dense_summary,key_facts
+OPENROUTER_BASE_URL=https://polza.ai/api/v1
 ```
 
 ---

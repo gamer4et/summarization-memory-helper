@@ -48,7 +48,6 @@ from backend.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_BASE_URL = "https://openrouter.ai/api/v1"
 _OPENROUTER_REFERER = "https://github.com/summarization-memory-helper"
 _OPENROUTER_TITLE = "Book Summarizer"
 _OPENAI_API_KEY_PLACEHOLDER = "missing-openrouter-api-key"
@@ -480,7 +479,7 @@ def _openrouter_extra_headers() -> dict[str, str]:
 def _openrouter_client(timeout: httpx.Timeout | None = None) -> AsyncOpenAI:
     return AsyncOpenAI(
         api_key=settings.openrouter.api_key or _OPENAI_API_KEY_PLACEHOLDER,
-        base_url=_BASE_URL,
+        base_url=settings.openrouter.base_url,
         default_headers=_openrouter_extra_headers(),
         timeout=timeout or _DEFAULT_TIMEOUT,
     )

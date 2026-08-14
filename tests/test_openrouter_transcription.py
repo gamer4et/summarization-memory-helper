@@ -82,6 +82,11 @@ def fake_openrouter_client(monkeypatch):
     _FakeAsyncOpenAI.instances = []
     monkeypatch.setattr(openrouter_client, "AsyncOpenAI", _FakeAsyncOpenAI)
     monkeypatch.setattr(openrouter_client.settings.openrouter, "api_key", "test-key")
+    monkeypatch.setattr(
+        openrouter_client.settings.openrouter,
+        "base_url",
+        "https://openrouter.ai/api/v1",
+    )
     transcription_settings = openrouter_client.settings.openrouter.transcription
     monkeypatch.setattr(transcription_settings, "model", "google/gemini-3.1-pro-preview")
     monkeypatch.setattr(transcription_settings, "provider_order", [])
@@ -105,6 +110,16 @@ def test_transcription_settings_normalizes_provider_order() -> None:
 
     assert settings.provider_order == ["google-vertex/global", "openai"]
     assert settings.provider_allow_fallbacks is None
+
+
+def test_openrouter_settings_normalizes_empty_and_trailing_slash_base_url() -> None:
+    default_settings = openrouter_client.settings.openrouter.__class__(base_url="")
+    custom_settings = openrouter_client.settings.openrouter.__class__(
+        base_url="https://polza.ai/api/v1/"
+    )
+
+    assert default_settings.base_url == "https://openrouter.ai/api/v1"
+    assert custom_settings.base_url == "https://polza.ai/api/v1"
 
 
 def test_structured_response_schema_is_openrouter_strict() -> None:
@@ -162,6 +177,22 @@ async def test_transcribe_audio_uses_openai_client_streaming(caplog, tmp_path):
     assert "Prepared transcription payload" in caplog.text
     assert "wav_bytes=" in caplog.text
     assert "base64_bytes=" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_uses_configured_openai_base_url(monkeypatch, tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    _write_wav(audio_path)
+    monkeypatch.setattr(
+        openrouter_client.settings.openrouter,
+        "base_url",
+        "https://polza.ai/api/v1",
+    )
+
+    await openrouter_client.transcribe_audio(audio_path)
+
+    client_kwargs = _FakeAsyncOpenAI.instances[0].kwargs
+    assert str(client_kwargs["base_url"]) == "https://polza.ai/api/v1"
 
 
 @pytest.mark.asyncio
